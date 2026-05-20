@@ -1,0 +1,26 @@
+[Unit]
+Description=ZimaOS VM Extras - Autostart, Snapshots, USB-Passthrough for ZVM
+# Service names verified on ZimaOS 1.6.1: the gateway/message-bus units are
+# zimaos-*, and the libvirt daemon is virtqemud (not libvirtd).
+After=zimaos-gateway.service zimaos-message-bus.service virtqemud.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStartPre=/usr/bin/mkdir -p /DATA/AppData/zima-vm-extras /DATA/AppData/zima-vm-extras/snapshots
+ExecStart=/usr/bin/zima-vm-extras
+Environment=BIND_ADDR=127.0.0.1
+Environment=PORT=8473
+Environment=DATA_DIR=/DATA/AppData/zima-vm-extras
+Environment=STATIC_DIR=/usr/share/casaos/www/modules/zima_vm_extras
+Environment=VIRSH_BIN=/usr/bin/virsh
+Environment=TZ=Europe/Berlin
+NoNewPrivileges=true
+ProtectHome=true
+StandardOutput=journal
+StandardError=journal
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

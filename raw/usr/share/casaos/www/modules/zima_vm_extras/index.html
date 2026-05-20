@@ -1,0 +1,229 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <link rel="icon" type="image/svg+xml" href="./appicon.svg">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="robots" content="noindex">
+  <meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
+  <title>VM Extras</title>
+  <link rel="stylesheet" href="./styles.css?v=0.4.0">
+</head>
+<body class="dark">
+  <header>
+    <div class="title-row">
+      <h1>VM Extras</h1>
+      <span class="version" id="app-version">v0.3</span>
+    </div>
+    <p class="subtitle">Extensions for ZimaOS's built-in VM manager (ZVM): autostart, snapshots, USB &amp; PCIe passthrough, and remote storage.</p>
+    <div id="status-bar" class="status-bar">
+      <span class="stat"><span class="stat-num" id="stat-total">–</span><span class="stat-lbl">VMs</span></span>
+      <span class="stat"><span class="stat-num" id="stat-running">–</span><span class="stat-lbl">running</span></span>
+      <span class="stat"><span class="stat-num" id="stat-autostart">–</span><span class="stat-lbl">autostart</span></span>
+      <button id="refresh-btn" class="btn-secondary">Refresh</button>
+    </div>
+  </header>
+
+  <nav class="tabs" role="tablist">
+    <button class="tab-btn active" data-tab="autostart" role="tab" aria-selected="true">Autostart</button>
+    <button class="tab-btn" data-tab="snapshots" role="tab" aria-selected="false">Snapshots</button>
+    <button class="tab-btn" data-tab="usb" role="tab" aria-selected="false">USB passthrough</button>
+    <button class="tab-btn" data-tab="pci" role="tab" aria-selected="false">PCIe passthrough</button>
+    <button class="tab-btn" data-tab="metrics" role="tab" aria-selected="false">Metrics</button>
+    <button class="tab-btn" data-tab="backup" role="tab" aria-selected="false">Backup</button>
+    <button class="tab-btn" data-tab="network" role="tab" aria-selected="false">Network</button>
+    <button class="tab-btn" data-tab="storage" role="tab" aria-selected="false">Remote storage</button>
+  </nav>
+
+  <main>
+    <section id="tab-autostart" class="tab-panel active" role="tabpanel">
+      <p class="panel-hint">
+        Starts VMs on host boot, orchestrated by VM Extras. <b>Order</b>: lower number starts first (0–999). <b>Delay</b>: seconds to wait after this VM before starting the next.
+        <br><small><b>Watchdog</b>: keeps a VM running — restarts it within ~30&nbsp;s if it stops or crashes (turn the watchdog off to stop such a VM). VM Extras runs the ordered startup itself a few seconds after boot; the libvirt-native autostart flag is kept off so order &amp; delay are honoured.</small>
+      </p>
+      <div id="autostart-list" class="vm-list">
+        <div class="loading">Loading…</div>
+      </div>
+    </section>
+
+    <section id="tab-snapshots" class="tab-panel" role="tabpanel">
+      <p class="panel-hint">
+        Create, revert or delete snapshots per VM. Running VMs get a full external snapshot (disk + memory) so it can be reverted; shut-off VMs get a quick internal snapshot.
+        <br><small><b>Tip:</b> prefer an ext4/xfs/btrfs storage target — exFAT/FAT cannot store sparse files, so overlay snapshots there grow to their full size.</small>
+      </p>
+      <div class="vm-picker-row">
+        <label for="snap-vm-select">VM:</label>
+        <select id="snap-vm-select"></select>
+        <span id="snap-vm-meta" class="vm-meta-inline"></span>
+      </div>
+      <div class="snap-create card">
+        <h3>Create snapshot</h3>
+        <div class="form-row">
+          <label>Name<input type="text" id="snap-name" placeholder="e.g. pre-update" maxlength="64"></label>
+          <label>Description<input type="text" id="snap-desc" placeholder="optional"></label>
+          <label class="checkbox"><input type="checkbox" id="snap-external" disabled> Full snapshot <small>(auto: running VMs → disk + memory)</small></label>
+          <button id="snap-create-btn" class="btn-primary">Create</button>
+        </div>
+        <div class="form-row snap-extdir-row" id="snap-extdir-row" style="display:none;">
+          <label class="grow">Storage target
+            <select id="snap-storage-select"></select>
+          </label>
+          <label class="grow">External target directory
+            <input type="text" id="snap-extdir" placeholder="/DATA/AppData/zima-vm-extras/snapshots/&lt;vm&gt;/">
+          </label>
+          <small class="hint-inline">Pick a mounted filesystem or type a custom absolute path. Disallowed: <code>/usr</code>, <code>/var</code>, <code>/etc</code>, <code>/proc</code>, <code>/sys</code>, <code>/dev</code>, <code>/boot</code>, <code>/run</code>, <code>/tmp</code>. Network shares from the Remote storage tab can be used here too.</small>
+        </div>
+      </div>
+      <div class="snap-create card">
+        <h3>Automatic snapshots</h3>
+        <div class="form-row">
+          <label class="checkbox"><input type="checkbox" id="sched-enabled"> Enabled</label>
+          <label>Every (hours)<input type="number" id="sched-interval" min="1" max="8760" value="24"></label>
+          <label>Keep newest<input type="number" id="sched-keep" min="0" max="100" value="7"></label>
+          <button id="sched-save-btn" class="btn-primary">Save schedule</button>
+        </div>
+        <small class="hint-inline" id="sched-status">Scheduled snapshots are named <code>auto-…</code>; retention only ever prunes those, never your manual snapshots.</small>
+      </div>
+      <div class="snap-list-wrap">
+        <h3>Existing snapshots</h3>
+        <div id="snap-list" class="snap-list">
+          <div class="loading">Loading…</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-storage" class="tab-panel" role="tabpanel">
+      <p class="panel-hint">
+        Mount NFS or SMB/CIFS shares from your network. Mounted paths automatically appear in the snapshot storage dropdown.
+        <br><small><b>Note:</b> Credentials are stored locally in <code>/DATA/AppData/zima-vm-extras/mounts.json</code> (mode 0600, root-owned). Auto-mount re-mounts on daemon start.</small>
+      </p>
+      <div class="snap-create card">
+        <h3>Add remote mount</h3>
+        <div class="form-row">
+          <label>Name<input type="text" id="mount-name" placeholder="e.g. NAS-Backup" maxlength="64"></label>
+          <label>Type
+            <select id="mount-type">
+              <option value="nfs4">NFS v4</option>
+              <option value="nfs">NFS v3</option>
+              <option value="cifs">SMB / CIFS</option>
+            </select>
+          </label>
+          <label>Host<input type="text" id="mount-host" placeholder="192.168.1.10 or hostname"></label>
+          <label>Share<input type="text" id="mount-share" placeholder="/export/backup or sharename"></label>
+        </div>
+        <div class="form-row">
+          <label class="grow">Mountpoint<input type="text" id="mount-mp" placeholder="/DATA/.zvmx-mounts/backup"></label>
+          <label class="checkbox" title="Re-mount on daemon start"><input type="checkbox" id="mount-auto" checked> Auto-mount</label>
+          <label class="checkbox"><input type="checkbox" id="mount-ro"> Read-only</label>
+        </div>
+        <div class="form-row mount-smb-row" id="mount-smb-row" style="display:none;">
+          <label>Username<input type="text" id="mount-user" autocomplete="off"></label>
+          <label>Password<input type="password" id="mount-pass" autocomplete="new-password"></label>
+          <small class="hint-inline">Stored locally in mode 0600 file. Leave empty when editing to keep the existing password.</small>
+        </div>
+        <div class="form-row">
+          <label>Extra mount options<input type="text" id="mount-opts" placeholder="vers=3.0,sec=ntlmssp (optional)"></label>
+          <button id="mount-save-btn" class="btn-primary">Save &amp; mount</button>
+          <button id="mount-reset-btn" class="btn-secondary">Reset form</button>
+        </div>
+      </div>
+      <div class="snap-list-wrap">
+        <h3>Configured mounts</h3>
+        <div id="mount-list" class="snap-list">
+          <div class="loading">Loading…</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-usb" class="tab-panel" role="tabpanel">
+      <p class="panel-hint">
+        Pass a USB device — one physically plugged into the <b>ZimaOS device itself</b> (not your PC) — through to a VM. <b>Persistent</b> pins it: VM Extras re-adds it automatically if the ZVM UI strips it on re-save, and keeps it across host reboots.
+      </p>
+      <div class="vm-picker-row">
+        <label for="usb-vm-select">Target VM:</label>
+        <select id="usb-vm-select"></select>
+      </div>
+      <div class="usb-host-wrap">
+        <h3>Host USB devices</h3>
+        <div id="usb-host-list" class="usb-list">
+          <div class="loading">Loading…</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-pci" class="tab-panel" role="tabpanel">
+      <p class="panel-hint">
+        Pass a PCI device of the <b>ZimaOS device itself</b> (not your PC) through to a VM via VFIO. <b>Persistent</b> pins it — VM Extras re-applies it if the ZVM UI strips it on re-save, and keeps it across host reboots.
+        <br><small><b>Important:</b> all devices in the same IOMMU group must go to the same VM. Never pass a device the host itself needs (boot GPU, system disk controller). Bridges cannot be passed.</small>
+      </p>
+      <div class="vm-picker-row">
+        <label for="pci-vm-select">Target VM:</label>
+        <select id="pci-vm-select"></select>
+      </div>
+      <div class="usb-host-wrap">
+        <h3>Host PCI devices</h3>
+        <div id="pci-host-list" class="usb-list">
+          <div class="loading">Loading…</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-metrics" class="tab-panel" role="tabpanel">
+      <p class="panel-hint">
+        Live performance of a VM — CPU, memory, disk and network — sampled from libvirt every 2&nbsp;seconds.
+      </p>
+      <div class="vm-picker-row">
+        <label for="metrics-vm-select">VM:</label>
+        <select id="metrics-vm-select"></select>
+      </div>
+      <div id="metrics-body" class="metrics-body">
+        <div class="loading">Loading…</div>
+      </div>
+    </section>
+
+    <section id="tab-backup" class="tab-panel" role="tabpanel">
+      <p class="panel-hint">
+        Export a VM — domain XML plus disk image(s) — as a standalone, compact qcow2 backup.
+        <br><small><b>Note:</b> the VM must be shut off for a consistent backup. Pick a roomy target — e.g. a Remote storage mount.</small>
+      </p>
+      <div class="snap-create card">
+        <h3>Create backup</h3>
+        <div class="form-row">
+          <label class="grow">VM<select id="backup-vm-select"></select></label>
+          <label class="grow">Target directory<input type="text" id="backup-dest" placeholder="/DATA/AppData/zima-vm-extras/backups"></label>
+          <button id="backup-start-btn" class="btn-primary">Start backup</button>
+        </div>
+      </div>
+      <div class="snap-list-wrap">
+        <h3>Backup jobs</h3>
+        <div id="backup-list" class="snap-list">
+          <div class="loading">Loading…</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-network" class="tab-panel" role="tabpanel">
+      <p class="panel-hint">
+        Switch a VM's NIC to a different libvirt network and change its model.
+        <br><small><b>Safe by design:</b> only existing libvirt networks are offered — no host bridges are created or changed. Edits apply to the VM config and take effect on the next VM start.</small>
+      </p>
+      <div class="vm-picker-row">
+        <label for="net-vm-select">VM:</label>
+        <select id="net-vm-select"></select>
+      </div>
+      <div class="usb-host-wrap">
+        <h3>Network interfaces</h3>
+        <div id="net-list" class="usb-list">
+          <div class="loading">Loading…</div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer>
+    <span id="status"></span>
+  </footer>
+
+  <script src="./app.js?v=0.4.0"></script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+dist/
+raw/usr/bin/zima-vm-extras
+*.raw
+*.sha256
+.idea/
+.vscode/
+
+# Internal test report — not published
+TESTPROTOKOLL.md
