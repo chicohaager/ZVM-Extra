@@ -6,4 +6,4 @@ raw/usr/bin/zima-vm-extras
 .vscode/
 
 # Internal test report — not published
-TESTPROTOKOLL.md
+TEST_REPORT.md
