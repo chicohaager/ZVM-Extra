@@ -32,6 +32,7 @@
     <button class="tab-btn" data-tab="metrics" role="tab" aria-selected="false">Metrics</button>
     <button class="tab-btn" data-tab="backup" role="tab" aria-selected="false">Backup</button>
     <button class="tab-btn" data-tab="network" role="tab" aria-selected="false">Network</button>
+    <button class="tab-btn" data-tab="vnc" role="tab" aria-selected="false">VNC display</button>
     <button class="tab-btn" data-tab="storage" role="tab" aria-selected="false">Remote storage</button>
   </nav>
 
@@ -215,6 +216,30 @@
         <h3>Network interfaces</h3>
         <div id="net-list" class="usb-list">
           <div class="loading">Loading…</div>
+        </div>
+      </div>
+    </section>
+
+    <section id="tab-vnc" class="tab-panel" role="tabpanel">
+      <p class="panel-hint">
+        Expose the native VNC port of the VM to the local network (0.0.0.0). This bypasses ZVM UI console constraints, allowing direct connection from TigerVNC, RealVNC, etc., and unblocks GPU passthrough display output.
+        <br><small class="warning-text"><b>Security Warning:</b> Exposing the VNC port (0.0.0.0) makes the VM console accessible to anyone on your local network. It is highly recommended to set a VNC password.</small>
+      </p>
+      <div class="vm-picker-row">
+        <label for="vnc-vm-select">Target VM:</label>
+        <select id="vnc-vm-select"></select>
+      </div>
+      <div class="snap-create card">
+        <h3>VNC Port Exposure Settings</h3>
+        <div class="form-row">
+          <label class="checkbox"><input type="checkbox" id="vnc-enabled"> Expose VNC Port (0.0.0.0)</label>
+          <label>VNC Port<input type="number" id="vnc-port" min="5900" max="65535" value="5900" placeholder="e.g. 5900"></label>
+          <label>VNC Password<input type="password" id="vnc-password" placeholder="optional" autocomplete="new-password"></label>
+          <button id="vnc-save-btn" class="btn-primary">Save Settings</button>
+        </div>
+        <div class="vnc-status-info" id="vnc-status-info" style="margin-top: 15px; font-size: 14px;">
+          <strong>Current Active VNC Config:</strong> <span id="vnc-active-badge" class="badge">Checking...</span>
+          <div id="vnc-active-details" style="margin-top: 5px; opacity: 0.8;"></div>
         </div>
       </div>
     </section>
