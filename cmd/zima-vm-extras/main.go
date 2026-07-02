@@ -30,6 +30,7 @@ import (
 	"github.com/chicohaager/zima-vm-extras/internal/pci"
 	"github.com/chicohaager/zima-vm-extras/internal/schedule"
 	"github.com/chicohaager/zima-vm-extras/internal/usb"
+	"github.com/chicohaager/zima-vm-extras/internal/vnc"
 	"github.com/chicohaager/zima-vm-extras/internal/virsh"
 	"github.com/chicohaager/zima-vm-extras/internal/watchdog"
 )
@@ -67,6 +68,11 @@ func main() {
 		log.Fatalf("open pci store: %v", err)
 	}
 
+	vncStore, err := vnc.NewStore(filepath.Join(cfg.DataDir, "vnc.json"))
+	if err != nil {
+		log.Fatalf("open vnc store: %v", err)
+	}
+
 	schedStore, err := schedule.NewStore(filepath.Join(cfg.DataDir, "schedule.json"))
 	if err != nil {
 		log.Fatalf("open schedule store: %v", err)
@@ -81,7 +87,7 @@ func main() {
 	// Runs once per boot (guarded by a tmpfs marker).
 	go store.Run(vc, log.Printf)
 
-	srv := handlers.NewServer(vc, store, mountMgr, usbStore, pciStore, schedStore, backupMgr, snapRoot)
+	srv := handlers.NewServer(vc, store, mountMgr, usbStore, pciStore, vncStore, schedStore, backupMgr, snapRoot)
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", srv.Routes())
@@ -153,6 +159,7 @@ func main() {
 	// that the official ZVM UI stripped from a domain's persistent config.
 	go usbStore.RunReconciler(ctx, vc, 60*time.Second, log.Printf)
 	go pciStore.RunReconciler(ctx, vc, 60*time.Second, log.Printf)
+	go vncStore.RunReconciler(ctx, vc, 60*time.Second, log.Printf)
 
 	// Keep watchdog-enabled VMs running.
 	go store.RunWatchdog(ctx, vc, 30*time.Second, log.Printf)

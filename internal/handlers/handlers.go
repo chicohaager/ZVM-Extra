@@ -20,6 +20,7 @@ import (
 	"github.com/chicohaager/zima-vm-extras/internal/schedule"
 	"github.com/chicohaager/zima-vm-extras/internal/storage"
 	"github.com/chicohaager/zima-vm-extras/internal/usb"
+	"github.com/chicohaager/zima-vm-extras/internal/vnc"
 	"github.com/chicohaager/zima-vm-extras/internal/virsh"
 )
 
@@ -29,13 +30,14 @@ type Server struct {
 	Mounts       *mounts.Manager
 	USB          *usb.Store
 	PCI          *pci.Store
+	VNC          *vnc.Store
 	Sched        *schedule.Store
 	Backup       *backup.Manager
 	SnapshotRoot string // base dir for external-snapshot files, e.g. /DATA/AppData/zima-vm-extras/snapshots
 }
 
-func NewServer(v *virsh.Client, st *autostart.Store, mm *mounts.Manager, us *usb.Store, pc *pci.Store, sc *schedule.Store, bk *backup.Manager, snapshotRoot string) *Server {
-	return &Server{Virsh: v, Auto: st, Mounts: mm, USB: us, PCI: pc, Sched: sc, Backup: bk, SnapshotRoot: snapshotRoot}
+func NewServer(v *virsh.Client, st *autostart.Store, mm *mounts.Manager, us *usb.Store, pc *pci.Store, vn *vnc.Store, sc *schedule.Store, bk *backup.Manager, snapshotRoot string) *Server {
+	return &Server{Virsh: v, Auto: st, Mounts: mm, USB: us, PCI: pc, VNC: vn, Sched: sc, Backup: bk, SnapshotRoot: snapshotRoot}
 }
 
 // Routes returns a mux with all API endpoints mounted under /api.
@@ -52,6 +54,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("/api/usb/", s.usbDomain)
 	mux.HandleFunc("/api/pci/host", s.pciHost)
 	mux.HandleFunc("/api/pci/", s.pciDomain)
+	mux.HandleFunc("/api/vnc/", s.vncDomain)
 	mux.HandleFunc("/api/storage/targets", s.storageTargets)
 	mux.HandleFunc("/api/metrics/", s.metricsHandler)
 	mux.HandleFunc("/api/schedule", s.scheduleCollection)
@@ -1062,4 +1065,144 @@ func (s *Server) netDomain(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeErr(w, 405, "method not allowed")
+}
+
+// vncDomain routes:
+//   GET    /api/vnc/<vm>        — get VNC config (active in XML vs stored)
+//   POST   /api/vnc/<vm>        — set VNC config (body: {enabled, port, listen_address, password})
+//   DELETE /api/vnc/<vm>        — disable and reset VNC to default (autoport, 127.0.0.1)
+func (s *Server) vncDomain(w http.ResponseWriter, r *http.Request) {
+	tail := strings.TrimPrefix(r.URL.Path, "/api/vnc/")
+	parts := strings.Split(strings.TrimSuffix(tail, "/"), "/")
+	if parts[0] == "" {
+		writeErr(w, 400, "vm name required")
+		return
+	}
+	vm := parts[0]
+	if !validName(vm) {
+		writeErr(w, 400, "invalid vm name")
+		return
+	}
+
+	switch r.Method {
+	case "GET":
+		stored, found := s.VNC.Get(vm)
+		xmlStr, err := s.Virsh.DumpXML(vm)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		active, hasActive := vnc.GetVNCConfig(xmlStr)
+
+		resp := map[string]any{
+			"stored": map[string]any{
+				"found":          found,
+				"enabled":        stored.Enabled,
+				"port":           stored.Port,
+				"listen_address": stored.ListenAddress,
+				"password":       stored.Password,
+			},
+			"active": map[string]any{
+				"has":            hasActive,
+				"port":           active.Port,
+				"autoport":       active.Autoport == "yes",
+				"listen_address": active.Listen,
+				"password":       active.Passwd,
+			},
+		}
+		writeJSON(w, 200, resp)
+
+	case "POST":
+		var in struct {
+			Enabled       bool   `json:"enabled"`
+			Port          int    `json:"port"`
+			ListenAddress string `json:"listen_address"`
+			Password      string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+
+		if in.ListenAddress == "" {
+			in.ListenAddress = "127.0.0.1"
+		}
+		if in.ListenAddress != "127.0.0.1" && in.ListenAddress != "0.0.0.0" {
+			writeErr(w, 400, "listen_address must be 127.0.0.1 or 0.0.0.0")
+			return
+		}
+
+		xmlStr, err := s.Virsh.DumpXML(vm)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+
+		targetPort := in.Port
+		targetListen := in.ListenAddress
+		targetPassword := in.Password
+		if !in.Enabled {
+			targetPort = 0
+			targetListen = "127.0.0.1"
+			targetPassword = ""
+		}
+
+		newXML, err := vnc.ModifyGraphicsXML(xmlStr, targetPort, targetListen, targetPassword)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+
+		if err := s.Virsh.DefineXML(newXML); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+
+		if in.Enabled {
+			err = s.VNC.Add(vnc.PinnedVNC{
+				VM:            vm,
+				Enabled:       true,
+				Port:          in.Port,
+				ListenAddress: in.ListenAddress,
+				Password:      in.Password,
+			})
+		} else {
+			err = s.VNC.Remove(vm)
+		}
+
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+
+		writeJSON(w, 200, map[string]any{"updated": true})
+
+	case "DELETE":
+		xmlStr, err := s.Virsh.DumpXML(vm)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+
+		newXML, err := vnc.ModifyGraphicsXML(xmlStr, 0, "127.0.0.1", "")
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+
+		if err := s.Virsh.DefineXML(newXML); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+
+		if err := s.VNC.Remove(vm); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+
+		writeJSON(w, 200, map[string]any{"deleted": true})
+
+	default:
+		writeErr(w, 405, "method not allowed")
+	}
 }

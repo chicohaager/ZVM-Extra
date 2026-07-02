@@ -124,7 +124,7 @@ function renderStatusBar() {
 }
 
 function populateVMSelects() {
-  for (const id of ['snap-vm-select', 'usb-vm-select', 'pci-vm-select', 'metrics-vm-select', 'backup-vm-select', 'net-vm-select']) {
+  for (const id of ['snap-vm-select', 'usb-vm-select', 'pci-vm-select', 'metrics-vm-select', 'backup-vm-select', 'net-vm-select', 'vnc-vm-select']) {
     const sel = $('#' + id);
     if (!sel) continue;
     const prev = sel.value;
@@ -920,6 +920,7 @@ function switchTab(name) {
   else if (name === 'metrics') renderMetricsTab();
   else if (name === 'backup') renderBackupTab();
   else if (name === 'network') renderNetworkTab();
+  else if (name === 'vnc') renderVNCTab();
   else if (name === 'storage') renderStorageTab();
 }
 
@@ -1041,6 +1042,96 @@ document.addEventListener('DOMContentLoaded', () => {
     }
   });
 
+  // VNC event listeners
+  $('#vnc-vm-select').addEventListener('change', renderVNCForCurrentVM);
+  $('#vnc-save-btn').addEventListener('click', async () => {
+    const vm = $('#vnc-vm-select').value;
+    if (!vm) { setStatus('No VM selected', 'error'); return; }
+    try {
+      $('#vnc-save-btn').disabled = true;
+      await api(`/vnc/${encodeURIComponent(vm)}`, {
+        method: 'POST',
+        body: JSON.stringify({
+          enabled: $('#vnc-enabled').checked,
+          port: parseInt($('#vnc-port').value, 10) || 5900,
+          listen_address: $('#vnc-enabled').checked ? '0.0.0.0' : '127.0.0.1',
+          password: $('#vnc-password').value,
+        }),
+      });
+      setStatus('VNC configuration saved', 'ok');
+      await renderVNCForCurrentVM();
+    } catch (e) {
+      setStatus(`Save failed: ${e.message}`, 'error');
+    } finally {
+      $('#vnc-save-btn').disabled = false;
+    }
+  });
+
   loadVersion();
   renderAutostartTab();
 });
+
+// ---------- VNC DISPLAY ----------
+
+async function renderVNCTab() {
+  await loadVMs();
+  const sel = $('#vnc-vm-select');
+  if (!sel.value && vmCache.length) sel.value = vmCache[0].name;
+  await renderVNCForCurrentVM();
+}
+
+async function renderVNCForCurrentVM() {
+  const vm = $('#vnc-vm-select').value;
+  const statusInfo = $('#vnc-status-info');
+  if (!vm) {
+    if (statusInfo) statusInfo.style.display = 'none';
+    return;
+  }
+  if (statusInfo) statusInfo.style.display = '';
+  const badge = $('#vnc-active-badge');
+  const details = $('#vnc-active-details');
+  if (badge) {
+    badge.textContent = 'Loading...';
+    badge.className = 'badge';
+  }
+  if (details) details.innerHTML = '';
+
+  try {
+    const r = await api(`/vnc/${encodeURIComponent(vm)}`);
+    
+    $('#vnc-enabled').checked = !!r.stored.enabled;
+    $('#vnc-port').value = r.stored.port || 5900;
+    $('#vnc-password').value = r.stored.password || '';
+
+    if (badge && details) {
+      if (r.active.has) {
+        if (r.active.listen_address === '0.0.0.0') {
+          badge.textContent = 'Exposed';
+          badge.className = 'badge badge-current';
+          
+          let html = `Listen Address: <code>${r.active.listen_address}</code><br>`;
+          if (r.active.autoport) {
+            html += `Port: <code>auto-allocated</code><br>`;
+          } else {
+            html += `Port: <code>${r.active.port}</code><br>`;
+          }
+          if (r.active.password) {
+            html += `Password: <code>configured</code>`;
+          } else {
+            html += `Password: <code style="color:var(--danger)">none (unsecured)</code>`;
+          }
+          details.innerHTML = html;
+        } else {
+          badge.textContent = 'Local Only';
+          badge.className = 'badge';
+          details.innerHTML = `Listen Address: <code>${r.active.listen_address}</code> (127.0.0.1)<br>Port: <code>${r.active.port}</code>`;
+        }
+      } else {
+        badge.textContent = 'Disabled / Unknown';
+        badge.className = 'badge';
+      }
+    }
+  } catch (e) {
+    setStatus(`Failed to load VNC config: ${e.message}`, 'error');
+  }
+}

@@ -305,3 +305,13 @@ footer {
 }
 #status.error { color: var(--danger); }
 #status.ok { color: var(--success); }
+
+.warning-text { color: var(--warning); }
+
+.vnc-status-info code {
+  background: var(--bg);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-size: 12px;
+}
+

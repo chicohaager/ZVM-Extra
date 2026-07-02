@@ -112,6 +112,17 @@ func (c *Client) DumpXML(name string) (string, error) {
 	return c.run("dumpxml", name)
 }
 
+// DefineXML defines (registers or updates) a domain from an XML string.
+func (c *Client) DefineXML(xmlStr string) error {
+	tmp, err := writeTempXML(xmlStr)
+	if err != nil {
+		return err
+	}
+	defer removeTemp(tmp)
+	_, err = c.run("define", tmp)
+	return err
+}
+
 // ---------- Snapshot operations ----------
 
 // Snapshot is a single libvirt snapshot record.
