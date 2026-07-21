@@ -5,8 +5,17 @@ It adds the day-to-day operational features the official UI lacks, without
 touching the ZVM frontend — it installs as a separate `zima_vm_extras.raw`
 sysext with its own **VM Extras** tile on the ZimaOS dashboard.
 
-> Status: **v0.5.2** — verified on ZimaOS **1.7.0-beta1** (kernel 6.18.9,
+> Status: **v0.6.0** — verified on ZimaOS **1.7.0-beta1** (kernel 6.18.9,
 > virtqemud / libvirt 10, qemu 9).
+>
+> **v0.6.0 adds the TPM & Secure Boot tab.** Windows 11 refuses to install
+> without a TPM 2.0, and ZVM creates every domain without one — even though
+> ZimaOS ships the `swtpm` emulator, `virsh domcapabilities` reports the
+> emulator backend with versions 1.2 and 2.0, and `/usr/share/qemu` carries a
+> firmware image literally named `edk2-x86_64-secure-code-win11.fd`. The
+> ingredients are all there and nothing wires them up. This tab adds
+> `<tpm model='tpm-crb'><backend type='emulator' version='2.0'/></tpm>` to the
+> domain and pins it, so a ZVM re-save cannot silently drop it again.
 >
 > **v0.5.x adds the VNC security tab.** ZVM generates every VM's console as
 > `<graphics type='vnc' listen='::'>` with **no password**, so anyone on the
@@ -40,6 +49,7 @@ sysext with its own **VM Extras** tile on the ZimaOS dashboard.
 | **USB passthrough** | Pass a host USB device into a VM from the GUI — no manual XML. *Persistent* devices are re-applied automatically if the ZVM UI strips them on re-save, and across host reboots. |
 | **PCIe passthrough** | Pass a host PCI device through via VFIO. Shows IOMMU groups and the current host driver; bridges are blocked. Same persistence/reconcile as USB. |
 | **VNC security** | Shows each VM's console listen address and whether it is password-protected, and sets a console password. ZVM leaves consoles open to the whole LAN with no authentication; a reconciler re-applies the password whenever ZVM strips it. Distinguishes a saved password from an *effective* one — a console keeps running without it until the VM restarts, and the tab says so instead of showing green. |
+| **TPM & Secure Boot** | Adds a TPM 2.0 emulator device so Windows 11 will install, and pins it against ZVM re-saves. Reports the saved device and the *running* one separately — a TPM added to a running VM only counts after a restart. Secure Boot status is shown but deliberately not switched: the firmware and its NVRAM file are a matched pair, and repointing an existing VM can leave it unbootable. |
 | **Metrics** | Live per-VM CPU, memory, disk and network, sampled from libvirt. |
 | **Backup** | Export a VM — domain XML + disk image(s) — as a standalone compact qcow2, asynchronously. |
 | **Network** | Switch a VM's NIC to another libvirt network and change its model — config-only, never touches host bridges. |

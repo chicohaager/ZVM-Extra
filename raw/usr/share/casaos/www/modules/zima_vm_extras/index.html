@@ -7,7 +7,7 @@
   <meta name="robots" content="noindex">
   <meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
   <title>VM Extras</title>
-  <link rel="stylesheet" href="./styles.css?v=0.5.2">
+  <link rel="stylesheet" href="./styles.css?v=0.6.0">
 </head>
 <body>
   <header>
@@ -32,6 +32,7 @@
     <button class="tab-btn" data-tab="usb" role="tab" aria-selected="false">USB passthrough</button>
     <button class="tab-btn" data-tab="pci" role="tab" aria-selected="false">PCIe passthrough</button>
     <button class="tab-btn" data-tab="vnc" role="tab" aria-selected="false">VNC security</button>
+    <button class="tab-btn" data-tab="tpm" role="tab" aria-selected="false">TPM &amp; Secure Boot</button>
     <button class="tab-btn" data-tab="metrics" role="tab" aria-selected="false">Metrics</button>
     <button class="tab-btn" data-tab="backup" role="tab" aria-selected="false">Backup</button>
     <button class="tab-btn" data-tab="network" role="tab" aria-selected="false">Network</button>
@@ -193,6 +194,29 @@
       </div>
     </section>
 
+    <section id="tab-tpm" class="tab-panel" role="tabpanel">
+      <p class="panel-hint">
+        Windows&nbsp;11 refuses to install without a <b>TPM&nbsp;2.0</b>, and ZVM creates every VM
+        without one — even though ZimaOS ships the <code>swtpm</code> emulator and libvirt reports
+        it as supported. Adding the device here makes the VM pass the check.
+        <br><small><b>Note:</b> the device edits the VM config and takes effect on the
+        <b>next VM start</b>. VM Extras re-adds it if the ZVM UI strips it on a re-save.
+        <b>Secure Boot</b> is shown but not switched: the firmware and its NVRAM file are a
+        matched pair, and repointing an existing VM at a different loader can leave it unable to
+        boot — that is a rebuild, not a toggle.</small>
+      </p>
+      <div class="vm-picker-row">
+        <label for="tpm-vm-select">VM:</label>
+        <select id="tpm-vm-select"></select>
+      </div>
+      <div class="usb-host-wrap">
+        <h3>Windows 11 readiness</h3>
+        <div id="tpm-body" class="usb-list">
+          <div class="loading">Loading…</div>
+        </div>
+      </div>
+    </section>
+
     <section id="tab-metrics" class="tab-panel" role="tabpanel">
       <p class="panel-hint">
         Live performance of a VM — CPU, memory, disk and network — sampled from libvirt every 2&nbsp;seconds.
@@ -249,6 +273,6 @@
     <span id="status"></span>
   </footer>
 
-  <script src="./app.js?v=0.5.2"></script>
+  <script src="./app.js?v=0.6.0"></script>
 </body>
 </html>

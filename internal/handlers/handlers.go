@@ -19,6 +19,7 @@ import (
 	"github.com/chicohaager/zima-vm-extras/internal/pci"
 	"github.com/chicohaager/zima-vm-extras/internal/schedule"
 	"github.com/chicohaager/zima-vm-extras/internal/storage"
+	"github.com/chicohaager/zima-vm-extras/internal/tpm"
 	"github.com/chicohaager/zima-vm-extras/internal/usb"
 	"github.com/chicohaager/zima-vm-extras/internal/virsh"
 	"github.com/chicohaager/zima-vm-extras/internal/vnc"
@@ -33,11 +34,12 @@ type Server struct {
 	Sched        *schedule.Store
 	Backup       *backup.Manager
 	VNC          *vnc.Store
+	TPM          *tpm.Store
 	SnapshotRoot string // base dir for external-snapshot files, e.g. /DATA/AppData/zima-vm-extras/snapshots
 }
 
-func NewServer(v *virsh.Client, st *autostart.Store, mm *mounts.Manager, us *usb.Store, pc *pci.Store, sc *schedule.Store, bk *backup.Manager, vn *vnc.Store, snapshotRoot string) *Server {
-	return &Server{Virsh: v, Auto: st, Mounts: mm, USB: us, PCI: pc, Sched: sc, Backup: bk, VNC: vn, SnapshotRoot: snapshotRoot}
+func NewServer(v *virsh.Client, st *autostart.Store, mm *mounts.Manager, us *usb.Store, pc *pci.Store, sc *schedule.Store, bk *backup.Manager, vn *vnc.Store, tp *tpm.Store, snapshotRoot string) *Server {
+	return &Server{Virsh: v, Auto: st, Mounts: mm, USB: us, PCI: pc, Sched: sc, Backup: bk, VNC: vn, TPM: tp, SnapshotRoot: snapshotRoot}
 }
 
 // Routes returns a mux with all API endpoints mounted under /api.
@@ -63,6 +65,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("/api/net/networks", s.netNetworks)
 	mux.HandleFunc("/api/net/", s.netDomain)
 	mux.HandleFunc("/api/vnc/", s.vncDomain)
+	mux.HandleFunc("/api/tpm/", s.tpmDomain)
 	mux.HandleFunc("/api/mounts", s.mountsCollection)
 	mux.HandleFunc("/api/mounts/", s.mountsItem)
 	return mux
@@ -346,10 +349,11 @@ func (s *Server) autostartItem(w http.ResponseWriter, r *http.Request) {
 // ---------- Snapshots ----------
 
 // snapshotHandler routes:
-//   GET    /api/snapshot/<vm>                 — list snapshots + capability info
-//   POST   /api/snapshot/<vm>                 — create (body: {name, description, external})
-//   POST   /api/snapshot/<vm>/<snap>/revert   — revert (body: {force})
-//   DELETE /api/snapshot/<vm>/<snap>          — delete (?children=1 for recursive)
+//
+//	GET    /api/snapshot/<vm>                 — list snapshots + capability info
+//	POST   /api/snapshot/<vm>                 — create (body: {name, description, external})
+//	POST   /api/snapshot/<vm>/<snap>/revert   — revert (body: {force})
+//	DELETE /api/snapshot/<vm>/<snap>          — delete (?children=1 for recursive)
 func (s *Server) snapshotHandler(w http.ResponseWriter, r *http.Request) {
 	tail := strings.TrimPrefix(r.URL.Path, "/api/snapshot/")
 	parts := strings.Split(strings.TrimSuffix(tail, "/"), "/")
@@ -412,12 +416,12 @@ func (s *Server) snapshotHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 type snapshotsResponse struct {
-	Data            []virsh.Snapshot `json:"data"`
-	Current         string           `json:"current"`
-	HasUEFI         bool             `json:"has_uefi"`
-	State           string           `json:"state"`
-	ExtRequired     bool             `json:"external_required"`     // hint for UI: must use external?
-	DefaultExtDir   string           `json:"default_external_dir"`  // suggested path
+	Data          []virsh.Snapshot `json:"data"`
+	Current       string           `json:"current"`
+	HasUEFI       bool             `json:"has_uefi"`
+	State         string           `json:"state"`
+	ExtRequired   bool             `json:"external_required"`    // hint for UI: must use external?
+	DefaultExtDir string           `json:"default_external_dir"` // suggested path
 }
 
 func (s *Server) snapshotList(w http.ResponseWriter, vm string) {
@@ -549,9 +553,10 @@ func (s *Server) usbHost(w http.ResponseWriter, r *http.Request) {
 }
 
 // usbDomain routes:
-//   GET    /api/usb/<vm>/pinned                — list pinned devices of a VM
-//   POST   /api/usb/<vm>                       — attach (body: {vendor_id, product_id, persistent, description})
-//   DELETE /api/usb/<vm>/<vendor>:<product>    — detach
+//
+//	GET    /api/usb/<vm>/pinned                — list pinned devices of a VM
+//	POST   /api/usb/<vm>                       — attach (body: {vendor_id, product_id, persistent, description})
+//	DELETE /api/usb/<vm>/<vendor>:<product>    — detach
 func (s *Server) usbDomain(w http.ResponseWriter, r *http.Request) {
 	tail := strings.TrimPrefix(r.URL.Path, "/api/usb/")
 	if tail == "host" {
@@ -653,9 +658,10 @@ func (s *Server) pciHost(w http.ResponseWriter, r *http.Request) {
 }
 
 // pciDomain routes:
-//   GET    /api/pci/<vm>/pinned    — list pinned PCI devices of a VM
-//   POST   /api/pci/<vm>           — attach (body: {address, persistent, description})
-//   DELETE /api/pci/<vm>/<address> — detach
+//
+//	GET    /api/pci/<vm>/pinned    — list pinned PCI devices of a VM
+//	POST   /api/pci/<vm>           — attach (body: {address, persistent, description})
+//	DELETE /api/pci/<vm>/<address> — detach
 func (s *Server) pciDomain(w http.ResponseWriter, r *http.Request) {
 	tail := strings.TrimPrefix(r.URL.Path, "/api/pci/")
 	if tail == "host" {
@@ -965,8 +971,9 @@ func (s *Server) netNetworks(w http.ResponseWriter, r *http.Request) {
 }
 
 // netDomain routes:
-//   GET /api/net/<vm>        — list the VM's NICs
-//   PUT /api/net/<vm>/<mac>  — switch a NIC to a libvirt network (body: {network, model})
+//
+//	GET /api/net/<vm>        — list the VM's NICs
+//	PUT /api/net/<vm>/<mac>  — switch a NIC to a libvirt network (body: {network, model})
 //
 // Switching only ever targets an existing libvirt network and only edits the
 // persistent config — it never creates host bridges, never changes a running
@@ -1149,6 +1156,91 @@ func (s *Server) vncDomain(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, 200, map[string]bool{"cleared": true})
+
+	default:
+		writeErr(w, 405, "method not allowed")
+	}
+}
+
+// tpmDomain routes the per-VM TPM 2.0 emulator device:
+//
+//	GET    /api/tpm/<vm>  — status, including the live device and the firmware
+//	POST   /api/tpm/<vm>  — add a TPM 2.0 device and pin it
+//	DELETE /api/tpm/<vm>  — remove the device and unpin
+//
+// Windows 11 refuses to install without a TPM 2.0, and ZVM creates every
+// domain without one even though ZimaOS ships swtpm and libvirt reports the
+// emulator backend as supported. Adding the device only edits the persistent
+// config, so it takes effect on the VM's next start — reported separately, in
+// the same three-state shape the VNC tab uses, because telling an operator
+// "TPM enabled" while the running guest has none sends them back to an
+// installer that still refuses.
+func (s *Server) tpmDomain(w http.ResponseWriter, r *http.Request) {
+	vm := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/tpm/"), "/")
+	if vm == "" {
+		writeErr(w, 400, "vm name required")
+		return
+	}
+	if !validName(vm) {
+		writeErr(w, 400, "invalid vm name")
+		return
+	}
+
+	switch r.Method {
+	case "GET":
+		present, model, version, err := s.Virsh.TPMInfo(vm)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		resp := map[string]any{
+			"vm": vm, "present": present, "model": model, "version": version,
+			"pinned": s.TPM.Pinned(vm),
+		}
+
+		running, livePresent, liveErr := s.Virsh.TPMLiveInfo(vm)
+		resp["running"] = running
+		if liveErr != nil {
+			// Never imply the guest has a TPM when we failed to look.
+			resp["live_error"] = liveErr.Error()
+		} else {
+			resp["live_present"] = livePresent
+			resp["restart_required"] = running && present && !livePresent
+		}
+
+		// Secure Boot is reported, never switched: the loader and its NVRAM
+		// vars file are a matched pair, and repointing an existing VM at a
+		// different loader can leave it unable to boot.
+		loader, secure, fwErr := s.Virsh.FirmwareInfo(vm)
+		if fwErr != nil {
+			resp["firmware_error"] = fwErr.Error()
+		} else {
+			resp["loader"] = loader
+			resp["secure_boot"] = secure
+			resp["uefi"] = loader != ""
+		}
+		writeJSON(w, 200, resp)
+
+	case "POST":
+		if err := s.Virsh.SetTPM(vm, true); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		// Pin it so the reconciler re-adds it if ZVM strips it on a re-save.
+		if err := s.TPM.Pin(vm); err != nil {
+			writeErr(w, 500, "TPM added, but pinning failed: "+err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"present": true, "note": "takes effect on next VM start"})
+
+	case "DELETE":
+		// Unpin first so the reconciler will not immediately re-add it.
+		_ = s.TPM.Unpin(vm)
+		if err := s.Virsh.SetTPM(vm, false); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]bool{"removed": true})
 
 	default:
 		writeErr(w, 405, "method not allowed")

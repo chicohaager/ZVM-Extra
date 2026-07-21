@@ -124,7 +124,7 @@ function renderStatusBar() {
 }
 
 function populateVMSelects() {
-  for (const id of ['snap-vm-select', 'usb-vm-select', 'pci-vm-select', 'vnc-vm-select', 'metrics-vm-select', 'backup-vm-select', 'net-vm-select']) {
+  for (const id of ['snap-vm-select', 'usb-vm-select', 'pci-vm-select', 'vnc-vm-select', 'tpm-vm-select', 'metrics-vm-select', 'backup-vm-select', 'net-vm-select']) {
     const sel = $('#' + id);
     if (!sel) continue;
     const prev = sel.value;
@@ -606,6 +606,131 @@ async function renderVNCForCurrentVM() {
   }
 }
 
+// ---------- TPM & SECURE BOOT ----------
+
+async function renderTPMTab() {
+  await loadVMs();
+  const sel = $('#tpm-vm-select');
+  if (!sel.value && vmCache.length) sel.value = vmCache[0].name;
+  await renderTPMForCurrentVM();
+}
+
+async function renderTPMForCurrentVM() {
+  const body = $('#tpm-body');
+  const vm = $('#tpm-vm-select').value;
+  if (!vm) { body.innerHTML = '<div class="empty">No VM selected.</div>'; return; }
+  body.innerHTML = '<div class="loading">Loading…</div>';
+  try {
+    const st = await api(`/tpm/${encodeURIComponent(vm)}`);
+    body.innerHTML = '';
+    body.appendChild(tpmCard(vm, st));
+    body.appendChild(firmwareCard(st));
+  } catch (e) {
+    body.innerHTML = `<div class="empty">Error: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function tpmCard(vm, st) {
+  const card = document.createElement('div');
+  card.className = 'usb-row card';
+
+  // Same three states as the VNC tab, for the same reason: the device is
+  // written to the persistent config, which the running qemu never re-reads.
+  // Reporting "TPM active" while the running guest has none would send the
+  // operator back to a Windows installer that still refuses.
+  let badge, desc;
+  if (st.live_error) {
+    badge = '<span class="badge badge-danger">live state unknown</span>';
+    desc = 'Could not read the running VM\'s devices: ' + escapeHtml(st.live_error);
+  } else if (st.restart_required) {
+    badge = '<span class="badge badge-warn">restart required</span>';
+    desc = 'The TPM is saved in the VM config, but the guest running right now ' +
+      'started without one and still fails the Windows 11 check. Restart the VM.';
+  } else if (st.present) {
+    badge = '<span class="badge badge-current">TPM present</span>';
+    desc = `The VM has a TPM device (${escapeHtml(st.model || 'unknown model')}` +
+      `${st.version ? ', version ' + escapeHtml(st.version) : ''}).`;
+  } else {
+    badge = '<span class="badge badge-danger">no TPM</span>';
+    desc = 'This VM has no TPM device — Windows 11 will refuse to install.';
+  }
+
+  card.innerHTML = `
+    <div class="usb-info">
+      <div class="usb-id">TPM ${badge}</div>
+      <div class="usb-desc">${desc}</div>
+      <div class="usb-meta">${st.pinned ? 'pinned by VM Extras' : 'not pinned'}${st.running ? ' · VM running' : ' · VM not running'}</div>
+    </div>
+    <div class="usb-actions">
+      ${st.present
+        ? '<button class="btn-danger" data-act="remove">Remove TPM</button>'
+        : '<button class="btn-primary" data-act="add">Add TPM 2.0</button>'}
+    </div>
+  `;
+
+  const addBtn = card.querySelector('[data-act="add"]');
+  if (addBtn) addBtn.addEventListener('click', async () => {
+    addBtn.disabled = true;
+    try {
+      const r = await api(`/tpm/${encodeURIComponent(vm)}`, { method: 'POST' });
+      setStatus(r.note ? `TPM 2.0 added — ${r.note}` : 'TPM 2.0 added', 'ok');
+      renderTPMForCurrentVM();
+    } catch (e) {
+      setStatus('Adding the TPM failed: ' + e.message, 'error');
+      addBtn.disabled = false;
+    }
+  });
+
+  const rmBtn = card.querySelector('[data-act="remove"]');
+  if (rmBtn) rmBtn.addEventListener('click', async () => {
+    rmBtn.disabled = true;
+    try {
+      await api(`/tpm/${encodeURIComponent(vm)}`, { method: 'DELETE' });
+      setStatus('TPM removed — takes effect on next VM start', 'ok');
+      renderTPMForCurrentVM();
+    } catch (e) {
+      setStatus('Removing the TPM failed: ' + e.message, 'error');
+      rmBtn.disabled = false;
+    }
+  });
+
+  return card;
+}
+
+// Secure Boot is reported, never switched — see the note in the panel hint.
+function firmwareCard(st) {
+  const card = document.createElement('div');
+  card.className = 'usb-row card';
+
+  let badge, desc;
+  if (st.firmware_error) {
+    badge = '<span class="badge badge-danger">firmware unknown</span>';
+    desc = 'Could not read the VM\'s firmware: ' + escapeHtml(st.firmware_error);
+  } else if (!st.uefi) {
+    badge = '<span class="badge badge-danger">legacy BIOS</span>';
+    desc = 'This VM boots legacy BIOS. Windows 11 requires UEFI, so no TPM will ' +
+      'make it install here — the VM has to be recreated with UEFI firmware.';
+  } else if (st.secure_boot) {
+    badge = '<span class="badge badge-current">secure boot firmware</span>';
+    desc = 'The VM uses a Secure Boot capable firmware image.';
+  } else {
+    badge = '<span class="badge badge-warn">UEFI, no secure boot</span>';
+    desc = 'The VM uses UEFI but the plain firmware image, which cannot enforce ' +
+      'Secure Boot. ZimaOS ships a Secure Boot image next to it, but switching ' +
+      'an existing VM to it needs a fresh NVRAM file — doing that here could ' +
+      'leave the VM unable to boot, so it is not offered.';
+  }
+
+  card.innerHTML = `
+    <div class="usb-info">
+      <div class="usb-id">Firmware ${badge}</div>
+      <div class="usb-desc">${desc}</div>
+      <div class="usb-meta">${st.loader ? 'loader: ' + escapeHtml(st.loader) : 'no UEFI loader'}</div>
+    </div>
+  `;
+  return card;
+}
+
 function vncCard(vm, st) {
   const card = document.createElement('div');
   card.className = 'usb-row card';
@@ -1021,6 +1146,7 @@ function switchTab(name) {
   else if (name === 'usb') renderUSBTab();
   else if (name === 'pci') renderPCITab();
   else if (name === 'vnc') renderVNCTab();
+  else if (name === 'tpm') renderTPMTab();
   else if (name === 'metrics') renderMetricsTab();
   else if (name === 'backup') renderBackupTab();
   else if (name === 'network') renderNetworkTab();
@@ -1037,6 +1163,7 @@ document.addEventListener('DOMContentLoaded', () => {
   $('#usb-vm-select').addEventListener('change', renderUSBTab);
   $('#pci-vm-select').addEventListener('change', renderPCITab);
   $('#vnc-vm-select').addEventListener('change', renderVNCForCurrentVM);
+  $('#tpm-vm-select').addEventListener('change', renderTPMForCurrentVM);
   $('#metrics-vm-select').addEventListener('change', () => { metricsPrev = null; pollMetrics(); });
   $('#net-vm-select').addEventListener('change', renderNICsForCurrentVM);
   $('#snap-external').addEventListener('change', updateExtDirVisibility);
