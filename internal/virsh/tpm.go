@@ -153,28 +153,63 @@ func (c *Client) SetTPM(domain string, enabled bool) error {
 // specific edk2-x86_64-secure-code-win11.fd next to the plain code images.
 var secureLoaderRe = regexp.MustCompile(`secure-code`)
 
-// FirmwareInfo reports the domain's UEFI loader path and whether it is a
-// Secure Boot capable image. A domain with no <loader> boots legacy BIOS,
-// which Windows 11 does not support at all.
-func (c *Client) FirmwareInfo(domain string) (loader string, secureBoot bool, err error) {
+// firmwareFeatureRe extracts libvirt's <feature enabled='…' name='…'/>
+// entries from the <firmware> block.
+var firmwareFeatureRe = regexp.MustCompile(`<feature\s+enabled='(yes|no)'\s+name='([a-z-]+)'\s*/>`)
+
+// Firmware describes a domain's UEFI setup as it bears on Windows 11.
+//
+// SecureBoot and EnrolledKeys are deliberately separate. A firmware can have
+// Secure Boot switched on while carrying no Platform Key at all, which leaves
+// it in setup mode: it validates nothing. ZimaOS is exactly that case — its
+// own descriptor 70-edk2-win11.json pairs edk2-x86_64-secure-code-win11.fd
+// with the *empty* edk2-i386-vars.fd, and the host ships no vars file with
+// Microsoft's keys enrolled. Reporting such a VM as plain "secure boot" would
+// be a green badge over a firmware that enforces nothing.
+type Firmware struct {
+	Loader       string // path to the UEFI code image, "" for legacy BIOS
+	SecureBoot   bool   // firmware is Secure Boot capable and has it enabled
+	EnrolledKeys bool   // …and carries keys, so it actually validates
+}
+
+// FirmwareInfo reports the domain's UEFI firmware. A domain with no <loader>
+// boots legacy BIOS, which Windows 11 does not support at all.
+func (c *Client) FirmwareInfo(domain string) (Firmware, error) {
 	out, err := c.run("dumpxml", "--inactive", "--security-info", domain)
 	if err != nil {
-		return "", false, err
+		return Firmware{}, err
 	}
+
+	var fw Firmware
+	for _, m := range firmwareFeatureRe.FindAllStringSubmatch(out, -1) {
+		switch m[2] {
+		case "secure-boot":
+			fw.SecureBoot = m[1] == "yes"
+		case "enrolled-keys":
+			fw.EnrolledKeys = m[1] == "yes"
+		}
+	}
+
 	i := strings.Index(out, "<loader")
 	if i < 0 {
-		return "", false, nil
+		return fw, nil
 	}
 	rest := out[i:]
 	j := strings.Index(rest, "</loader>")
 	if j < 0 {
-		return "", false, nil
+		return fw, nil
 	}
 	tag := rest[:j]
 	k := strings.IndexByte(tag, '>')
 	if k < 0 {
-		return "", false, nil
+		return fw, nil
 	}
-	loader = strings.TrimSpace(tag[k+1:])
-	return loader, secureLoaderRe.MatchString(loader), nil
+	fw.Loader = strings.TrimSpace(tag[k+1:])
+
+	// Older domains carry no <firmware> feature block; fall back to the image
+	// name, which is how the secure variants are distinguished on disk.
+	if !fw.SecureBoot && secureLoaderRe.MatchString(fw.Loader) {
+		fw.SecureBoot = true
+	}
+	return fw, nil
 }

@@ -146,23 +146,62 @@ func TestFirmwareInfoDetectsNonSecureLoader(t *testing.T) {
 	bin, _ := fakeVirsh(t, "running", zvmUEFIDomain, zvmUEFIDomain)
 	c := &Client{Bin: bin, Timeout: 5 * time.Second}
 
-	loader, secure, err := c.FirmwareInfo("55f68434")
+	fw, err := c.FirmwareInfo("55f68434")
 	if err != nil {
 		t.Fatalf("FirmwareInfo: %v", err)
 	}
-	if loader != "/usr/share/qemu/edk2-x86_64-code.fd" {
-		t.Errorf("loader = %q, want the plain edk2 code image", loader)
+	if fw.Loader != "/usr/share/qemu/edk2-x86_64-code.fd" {
+		t.Errorf("loader = %q, want the plain edk2 code image", fw.Loader)
 	}
-	if secure {
-		t.Error("secureBoot = true for edk2-x86_64-code.fd, which is not the secure image")
+	if fw.SecureBoot {
+		t.Error("SecureBoot = true for edk2-x86_64-code.fd, which is not the secure image")
 	}
+}
 
-	secureDom := strings.Replace(zvmUEFIDomain,
-		"edk2-x86_64-code.fd", "edk2-x86_64-secure-code-win11.fd", 1)
-	bin2, _ := fakeVirsh(t, "running", secureDom, secureDom)
-	c2 := &Client{Bin: bin2, Timeout: 5 * time.Second}
-	if _, secure2, err := c2.FirmwareInfo("55f68434"); err != nil || !secure2 {
-		t.Errorf("secureBoot = %v, err = %v for the win11 secure image; want true, nil", secure2, err)
+// This is the domain ZVM writes for a Windows 11 guest, measured on ZimaOS
+// 1.7.0-beta1: Secure Boot switched on, but paired with the empty
+// edk2-i386-vars.fd, so no keys are enrolled and the firmware validates
+// nothing. Reporting that as plain "secure boot" would be a green badge over
+// a firmware in setup mode.
+const zvmWin11Domain = `<domain type='kvm'>
+  <name>bdc44a1d</name>
+  <os firmware='efi'>
+    <type arch='x86_64' machine='pc-q35-10.2'>hvm</type>
+    <firmware>
+      <feature enabled='no' name='enrolled-keys'/>
+      <feature enabled='yes' name='secure-boot'/>
+    </firmware>
+    <loader readonly='yes' secure='yes' type='pflash'>/usr/share/qemu/edk2-x86_64-secure-code-win11.fd</loader>
+    <nvram template='/usr/share/qemu/edk2-i386-vars.fd'>/var/lib/libvirt/qemu/nvram/bdc44a1d_VARS.fd</nvram>
+  </os>
+  <devices>
+    <tpm model='tpm-tis'>
+      <backend type='emulator' version='2.0'/>
+    </tpm>
+  </devices>
+</domain>`
+
+func TestFirmwareInfoSecureBootWithoutEnrolledKeys(t *testing.T) {
+	bin, _ := fakeVirsh(t, "running", zvmWin11Domain, zvmWin11Domain)
+	c := &Client{Bin: bin, Timeout: 5 * time.Second}
+
+	fw, err := c.FirmwareInfo("bdc44a1d")
+	if err != nil {
+		t.Fatalf("FirmwareInfo: %v", err)
+	}
+	if !fw.SecureBoot {
+		t.Error("SecureBoot = false, but the firmware block enables it")
+	}
+	if fw.EnrolledKeys {
+		t.Error("EnrolledKeys = true, but the firmware block says enabled='no' — " +
+			"reporting this as fully protected would be a green badge over a " +
+			"firmware that validates nothing")
+	}
+	// The TPM half must still read correctly on the same domain.
+	present, model, version, err := c.TPMInfo("bdc44a1d")
+	if err != nil || !present || model != "tpm-tis" || version != "2.0" {
+		t.Errorf("TPMInfo = (%v, %q, %q, %v); want (true, \"tpm-tis\", \"2.0\", nil)",
+			present, model, version, err)
 	}
 }
 
@@ -173,11 +212,12 @@ func TestFirmwareInfoLegacyBIOS(t *testing.T) {
 		`<domain><os><type>hvm</type></os><devices/></domain>`)
 	c := &Client{Bin: bin, Timeout: 5 * time.Second}
 
-	loader, secure, err := c.FirmwareInfo("x")
+	fw, err := c.FirmwareInfo("x")
 	if err != nil {
 		t.Fatalf("FirmwareInfo: %v", err)
 	}
-	if loader != "" || secure {
-		t.Errorf("loader=%q secure=%v for a legacy-BIOS domain; want \"\" false", loader, secure)
+	if fw.Loader != "" || fw.SecureBoot {
+		t.Errorf("loader=%q secure=%v for a legacy-BIOS domain; want \"\" false",
+			fw.Loader, fw.SecureBoot)
 	}
 }

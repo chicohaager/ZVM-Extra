@@ -710,9 +710,21 @@ function firmwareCard(st) {
     badge = '<span class="badge badge-danger">legacy BIOS</span>';
     desc = 'This VM boots legacy BIOS. Windows 11 requires UEFI, so no TPM will ' +
       'make it install here — the VM has to be recreated with UEFI firmware.';
+  } else if (st.secure_boot && st.enrolled_keys) {
+    badge = '<span class="badge badge-current">secure boot active</span>';
+    desc = 'The VM uses a Secure Boot firmware with keys enrolled, so it ' +
+      'actually validates what it boots.';
   } else if (st.secure_boot) {
-    badge = '<span class="badge badge-current">secure boot firmware</span>';
-    desc = 'The VM uses a Secure Boot capable firmware image.';
+    // ZimaOS pairs its Windows 11 firmware with the *empty* edk2-i386-vars.fd
+    // and ships no vars file with Microsoft's keys, so Secure Boot is switched
+    // on with nothing to check against. Calling that plain "secure boot" would
+    // be a green badge over a firmware in setup mode.
+    badge = '<span class="badge badge-warn">secure boot, no keys</span>';
+    desc = 'Secure Boot is enabled but no keys are enrolled, so the firmware ' +
+      'is in setup mode and validates nothing. Windows 11 setup normally ' +
+      'accepts this — it checks for Secure Boot capability — but the VM is ' +
+      'not actually protected by it. ZimaOS ships no NVRAM template with keys ' +
+      'enrolled, so this cannot be fixed from here.';
   } else {
     badge = '<span class="badge badge-warn">UEFI, no secure boot</span>';
     desc = 'The VM uses UEFI but the plain firmware image, which cannot enforce ' +

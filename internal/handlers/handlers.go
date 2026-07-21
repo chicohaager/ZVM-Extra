@@ -1211,13 +1211,14 @@ func (s *Server) tpmDomain(w http.ResponseWriter, r *http.Request) {
 		// Secure Boot is reported, never switched: the loader and its NVRAM
 		// vars file are a matched pair, and repointing an existing VM at a
 		// different loader can leave it unable to boot.
-		loader, secure, fwErr := s.Virsh.FirmwareInfo(vm)
+		fw, fwErr := s.Virsh.FirmwareInfo(vm)
 		if fwErr != nil {
 			resp["firmware_error"] = fwErr.Error()
 		} else {
-			resp["loader"] = loader
-			resp["secure_boot"] = secure
-			resp["uefi"] = loader != ""
+			resp["loader"] = fw.Loader
+			resp["secure_boot"] = fw.SecureBoot
+			resp["enrolled_keys"] = fw.EnrolledKeys
+			resp["uefi"] = fw.Loader != ""
 		}
 		writeJSON(w, 200, resp)
 

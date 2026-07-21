@@ -7,7 +7,7 @@
   <meta name="robots" content="noindex">
   <meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
   <title>VM Extras</title>
-  <link rel="stylesheet" href="./styles.css?v=0.6.0">
+  <link rel="stylesheet" href="./styles.css?v=0.6.2">
 </head>
 <body>
   <header>
@@ -196,9 +196,10 @@
 
     <section id="tab-tpm" class="tab-panel" role="tabpanel">
       <p class="panel-hint">
-        Windows&nbsp;11 refuses to install without a <b>TPM&nbsp;2.0</b>, and ZVM creates every VM
-        without one — even though ZimaOS ships the <code>swtpm</code> emulator and libvirt reports
-        it as supported. Adding the device here makes the VM pass the check.
+        Windows&nbsp;11 refuses to install without a <b>TPM&nbsp;2.0</b>. ZVM adds one by itself
+        for guests it recognises as Windows&nbsp;11 — but there is no control for it anywhere in
+        its UI, so it can be neither forced nor turned off, and it does not reach other guests:
+        VMs created as Linux come out with no TPM at all. Add one here for any VM.
         <br><small><b>Note:</b> the device edits the VM config and takes effect on the
         <b>next VM start</b>. VM Extras re-adds it if the ZVM UI strips it on a re-save.
         <b>Secure Boot</b> is shown but not switched: the firmware and its NVRAM file are a
@@ -273,6 +274,6 @@
     <span id="status"></span>
   </footer>
 
-  <script src="./app.js?v=0.6.0"></script>
+  <script src="./app.js?v=0.6.2"></script>
 </body>
 </html>
