@@ -5,22 +5,33 @@ It adds the day-to-day operational features the official UI lacks, without
 touching the ZVM frontend — it installs as a separate `zima_vm_extras.raw`
 sysext with its own **VM Extras** tile on the ZimaOS dashboard.
 
-> Status: **v0.6.0** — verified on ZimaOS **1.7.0-beta1** (kernel 6.18.9,
+> Status: **v0.6.3** — verified on ZimaOS **1.7.0-beta1** (kernel 6.18.9,
 > virtqemud / libvirt 10, qemu 9).
 >
-> **v0.6.0 adds the TPM & Secure Boot tab.** Windows 11 refuses to install
-> without a TPM 2.0. ZVM has a Windows-specific code path for this — its
+> **v0.6.x adds the TPM & Secure Boot tab.** Windows 11 refuses to install
+> without a TPM 2.0. ZVM has a Windows-11-specific code path for this — its
 > backend carries a function named `EnableTPMForWin11` and references
-> `/usr/share/qemu/edk2-x86_64-secure-code-win11.fd` — but it is entirely
-> automatic and invisible: there is no control for it anywhere in the ZVM UI,
-> so it can be neither forced nor turned off. And it does not reach Linux
-> guests: three VMs created on ZimaOS 1.7.0-beta1 (Arch, Fedora, Mint) all came
-> out with no `<tpm>` element and the non-secure `edk2-x86_64-code.fd` loader.
+> `/usr/share/qemu/edk2-x86_64-secure-code-win11.fd` — and it works: a Windows
+> 11 VM created by ZVM comes out with `pc-q35` + `smm=on`, the Secure Boot
+> firmware and a `tpm-tis` 2.0 device, and Windows installs. But the path is
+> automatic and invisible — there is no control for it anywhere in the ZVM UI,
+> so it can be neither forced nor turned off — and it fires for Windows 11
+> only. A ZVM-created **Windows 10** VM gets no TPM and the plain
+> `edk2-x86_64-code.fd` loader, which rules out BitLocker in TPM mode with no
+> way to change it. Linux guests get nothing either.
 >
 > This tab makes the device explicit and operator-controlled: it adds
 > `<tpm model='tpm-crb'><backend type='emulator' version='2.0'/></tpm>` to any
 > VM and pins it, so a ZVM re-save cannot silently drop it again, and it shows
 > whether the *running* guest actually has one.
+>
+> It also reports something ZVM's own path leaves in a misleading state.
+> ZimaOS pairs its Windows 11 firmware with the **empty** `edk2-i386-vars.fd`
+> and ships no NVRAM template with keys enrolled, so Secure Boot is capable but
+> has nothing to validate against: the firmware stays in setup mode and reports
+> Secure Boot as **off** to the guest (`msinfo32` → *Secure Boot State: Off*).
+> Windows 11 installs regardless, because setup checks for capability. The tab
+> shows that as its own state rather than as a green "secure boot".
 >
 > **v0.5.x adds the VNC security tab.** ZVM generates every VM's console as
 > `<graphics type='vnc' listen='::'>` with **no password**, so anyone on the
