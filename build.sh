@@ -72,6 +72,11 @@ echo
 echo "=== Done ==="
 ls -lh "$DIST/"
 echo
-echo "Install on ZimaOS:"
-echo "  scp $DIST/$NAME.raw root@<host>:/var/lib/extensions/"
-echo "  ssh root@<host> 'systemd-sysext refresh && systemctl daemon-reload && systemctl enable --now zima-vm-extras.service'"
+# ZimaOS 1.7.0 ships sshd with PermitRootLogin no, so the install path goes
+# through the admin account and sudo — copying straight to root@<host> fails
+# at the login, not at the copy.
+echo "Install on ZimaOS (admin account + sudo; root SSH login is disabled):"
+echo "  scp $DIST/$NAME.raw <user>@<host>:/tmp/"
+echo "  ssh <user>@<host> 'sudo install -m 644 /tmp/$NAME.raw /var/lib/extensions/ && \\"
+echo "    sudo systemd-sysext refresh && sudo systemctl daemon-reload && \\"
+echo "    sudo systemctl enable --now zima-vm-extras.service'"

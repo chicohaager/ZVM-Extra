@@ -5,8 +5,56 @@ It adds the day-to-day operational features the official UI lacks, without
 touching the ZVM frontend — it installs as a separate `zima_vm_extras.raw`
 sysext with its own **VM Extras** tile on the ZimaOS dashboard.
 
-> Status: **v0.4.0** — verified on ZimaOS 1.6.1 (kernel 6.12, virtqemud /
-> libvirt 10, qemu 9).
+> Status: **v0.6.3** — verified on ZimaOS **1.7.0-beta1** (kernel 6.18.9,
+> virtqemud / libvirt 10, qemu 9).
+>
+> **v0.6.x adds the TPM & Secure Boot tab.** Windows 11 refuses to install
+> without a TPM 2.0. ZVM has a Windows-11-specific code path for this — its
+> backend carries a function named `EnableTPMForWin11` and references
+> `/usr/share/qemu/edk2-x86_64-secure-code-win11.fd` — and it works: a Windows
+> 11 VM created by ZVM comes out with `pc-q35` + `smm=on`, the Secure Boot
+> firmware and a `tpm-tis` 2.0 device, and Windows installs. But the path is
+> automatic and invisible — there is no control for it anywhere in the ZVM UI,
+> so it can be neither forced nor turned off — and it fires for Windows 11
+> only. A ZVM-created **Windows 10** VM gets no TPM and the plain
+> `edk2-x86_64-code.fd` loader, which rules out BitLocker in TPM mode with no
+> way to change it. Linux guests get nothing either.
+>
+> This tab makes the device explicit and operator-controlled: it adds
+> `<tpm model='tpm-crb'><backend type='emulator' version='2.0'/></tpm>` to any
+> VM and pins it, so a ZVM re-save cannot silently drop it again, and it shows
+> whether the *running* guest actually has one.
+>
+> It also reports something ZVM's own path leaves in a misleading state.
+> ZimaOS pairs its Windows 11 firmware with the **empty** `edk2-i386-vars.fd`
+> and ships no NVRAM template with keys enrolled, so Secure Boot is capable but
+> has nothing to validate against: the firmware stays in setup mode and reports
+> Secure Boot as **off** to the guest (`msinfo32` → *Secure Boot State: Off*).
+> Windows 11 installs regardless, because setup checks for capability. The tab
+> shows that as its own state rather than as a green "secure boot".
+>
+> **v0.5.x adds the VNC security tab.** ZVM generates every VM's console as
+> `<graphics type='vnc' listen='::'>` with **no password**, so anyone on the
+> LAN can take over a VM's screen and keyboard with a plain VNC viewer. This
+> tab sets a console password on the domain and a reconciler keeps it there
+> when ZVM re-saves the domain and strips it. The password applies at the VM's
+> **next start** — `virsh define` rewrites the persistent config and never
+> disturbs a running VM.
+>
+> **v0.5.1** fixes the read-back of that password: `virsh dumpxml` masks the
+> `passwd` attribute unless it is given `--security-info`, so a protected
+> console reported itself as *unprotected* — the tab showed the wrong state and
+> the reconciler re-defined the domain once a minute forever, because the
+> password it had just written kept reading back as absent.
+>
+> **v0.5.2** stops the tab from reporting a console as safe while it is still
+> open. The password goes into the persistent config, which the running qemu
+> never re-reads, so between setting it and the next VM start the config says
+> "protected" while the live console still lets anyone in. The tab now reads
+> the running domain separately and shows three states: **exposed** (no
+> password anywhere), **restart required** (saved, but the running console
+> started without it), and **password set** (the live console really does ask
+> for one).
 
 ## Features
 
@@ -16,6 +64,8 @@ sysext with its own **VM Extras** tile on the ZimaOS dashboard.
 | **Snapshots** | Create / revert / delete per VM. Running VMs get a full external snapshot (disk **+ memory state**) so it is genuinely revertable; shut-off VMs get a quick internal snapshot. An optional **schedule** takes periodic snapshots with retention. |
 | **USB passthrough** | Pass a host USB device into a VM from the GUI — no manual XML. *Persistent* devices are re-applied automatically if the ZVM UI strips them on re-save, and across host reboots. |
 | **PCIe passthrough** | Pass a host PCI device through via VFIO. Shows IOMMU groups and the current host driver; bridges are blocked. Same persistence/reconcile as USB. |
+| **VNC security** | Shows each VM's console listen address and whether it is password-protected, and sets a console password. ZVM leaves consoles open to the whole LAN with no authentication; a reconciler re-applies the password whenever ZVM strips it. Distinguishes a saved password from an *effective* one — a console keeps running without it until the VM restarts, and the tab says so instead of showing green. |
+| **TPM & Secure Boot** | Adds a TPM 2.0 emulator device so Windows 11 will install, and pins it against ZVM re-saves. Reports the saved device and the *running* one separately — a TPM added to a running VM only counts after a restart. Secure Boot status is shown but deliberately not switched: the firmware and its NVRAM file are a matched pair, and repointing an existing VM can leave it unbootable. |
 | **Metrics** | Live per-VM CPU, memory, disk and network, sampled from libvirt. |
 | **Backup** | Export a VM — domain XML + disk image(s) — as a standalone compact qcow2, asynchronously. |
 | **Network** | Switch a VM's NIC to another libvirt network and change its model — config-only, never touches host bridges. |
@@ -44,7 +94,7 @@ is never exposed on the LAN on a port of its own.
 
 ## Requirements
 
-- ZimaOS **1.6.1+** with a working ZVM install.
+- ZimaOS **1.6.1+** with a working ZVM install. Tested on 1.6.1 and 1.7.0-beta1.
 - For **PCIe passthrough**: `intel_iommu=on` (or `amd_iommu=on`) on the kernel
   cmdline — ZimaCube images ship with this already set.
 
@@ -54,11 +104,13 @@ is never exposed on the LAN on a port of its own.
 # On a build host (Linux, amd64) — needs go 1.22+ and squashfs-tools:
 ./build.sh                       # produces dist/zima_vm_extras.raw
 
-# On the ZimaOS device, as root:
-scp dist/zima_vm_extras.raw root@<zimaos>:/var/lib/extensions/
-ssh root@<zimaos> 'systemd-sysext refresh && \
-                   systemctl daemon-reload && \
-                   systemctl enable --now zima-vm-extras.service'
+# Copy it to the device. ZimaOS disables root SSH login (`PermitRootLogin no`),
+# so this goes through your admin account and sudo:
+scp dist/zima_vm_extras.raw <user>@<zimaos>:/tmp/
+ssh <user>@<zimaos> 'sudo install -m 644 /tmp/zima_vm_extras.raw /var/lib/extensions/ && \
+                     sudo systemd-sysext refresh && \
+                     sudo systemctl daemon-reload && \
+                     sudo systemctl enable --now zima-vm-extras.service'
 ```
 
 Or run `sudo ./install.sh` on the device after `build.sh`. Then open the
@@ -157,9 +209,12 @@ Removes the sysext, the watchdog units and the gateway route. State under
 ## Roadmap
 
 The original roadmap — live metrics, a VM watchdog, scheduled snapshots,
-backup/export and network switching — all shipped in v0.4.0. Possible future
-additions: compressed backup archives and an optional JWT auth layer in
-front of the API.
+backup/export and network switching — all shipped in v0.4.0; console password
+protection shipped in v0.5.x. Possible future additions: compressed backup
+archives, an optional JWT auth layer in front of the API, and further
+reconcilers for the defaults ZVM gets wrong on Linux guests (it stamps every
+VM `os_type=windows`, which drags in `clock offset='localtime'` and Hyper-V
+enlightenments, and it leaves the installer ISO attached and bootable).
 
 ## License
 
