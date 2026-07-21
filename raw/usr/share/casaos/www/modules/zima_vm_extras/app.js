@@ -720,10 +720,11 @@ function firmwareCard(st) {
     // on with nothing to check against. Calling that plain "secure boot" would
     // be a green badge over a firmware in setup mode.
     badge = '<span class="badge badge-warn">secure boot, no keys</span>';
-    desc = 'Secure Boot is enabled but no keys are enrolled, so the firmware ' +
-      'is in setup mode and validates nothing. Windows 11 setup normally ' +
-      'accepts this — it checks for Secure Boot capability — but the VM is ' +
-      'not actually protected by it. ZimaOS ships no NVRAM template with keys ' +
+    desc = 'The firmware is Secure Boot capable, but no keys are enrolled, so ' +
+      'it stays in setup mode and reports Secure Boot as <b>off</b> to the ' +
+      'guest — Windows shows "Secure Boot State: Off" in msinfo32. Windows 11 ' +
+      'still installs, because setup checks for Secure Boot capability rather ' +
+      'than for it being active. ZimaOS ships no NVRAM template with keys ' +
       'enrolled, so this cannot be fixed from here.';
   } else {
     badge = '<span class="badge badge-warn">UEFI, no secure boot</span>';
