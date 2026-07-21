@@ -1098,10 +1098,25 @@ func (s *Server) vncDomain(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		_, pinned := s.VNC.Get(vm)
-		writeJSON(w, 200, map[string]any{
+		// The persistent config is only half the answer. A password written
+		// after the VM booted does not reach the running qemu, so report the
+		// live console separately — otherwise the UI shows "protected" over a
+		// console that anyone on the LAN can still open right now.
+		running, liveHasPw, liveErr := s.Virsh.VNCLiveInfo(vm)
+		resp := map[string]any{
 			"vm": vm, "present": present, "protected": hasPw,
 			"listen": listen, "pinned": pinned,
-		})
+			"running": running, "live_protected": liveHasPw,
+			"restart_required": running && hasPw && !liveHasPw,
+		}
+		if liveErr != nil {
+			// Never silently claim the live console is fine when we failed to
+			// look: surface the reason and drop the fields it would have set.
+			delete(resp, "live_protected")
+			delete(resp, "restart_required")
+			resp["live_error"] = liveErr.Error()
+		}
+		writeJSON(w, 200, resp)
 
 	case "POST":
 		var in struct {

@@ -125,19 +125,77 @@ func TestSetGraphicsPasswordPicksVNCAmongMany(t *testing.T) {
 }
 
 // fakeVirsh writes a stub virsh to a temp dir. It records every invocation's
-// arguments one call per line in the returned log path, and answers dumpxml
-// with the given XML.
-func fakeVirsh(t *testing.T, dumpXML string) (bin, argLog string) {
+// arguments one call per line in the returned log path, answers dumpxml with
+// the given XML — a different document for the persistent (--inactive) and the
+// live dump, which is the whole point of the live-state tests — and reports
+// the given domstate.
+func fakeVirsh(t *testing.T, state, inactiveXML, liveXML string) (bin, argLog string) {
 	t.Helper()
 	dir := t.TempDir()
 	bin = filepath.Join(dir, "virsh")
 	argLog = filepath.Join(dir, "args.log")
-	script := "#!/bin/sh\necho \"$@\" >> " + argLog + "\n" +
-		"case \"$1\" in dumpxml) cat <<'XMLEOF'\n" + dumpXML + "\nXMLEOF\n;; esac\nexit 0\n"
+	script := "#!/bin/sh\n" +
+		"echo \"$@\" >> " + argLog + "\n" +
+		"case \"$1\" in\n" +
+		"  domstate) echo '" + state + "' ;;\n" +
+		"  dumpxml)\n" +
+		"    case \"$*\" in\n" +
+		"      *--inactive*) cat <<'INACTIVEEOF'\n" + inactiveXML + "\nINACTIVEEOF\n;;\n" +
+		"      *) cat <<'LIVEEOF'\n" + liveXML + "\nLIVEEOF\n;;\n" +
+		"    esac ;;\n" +
+		"esac\nexit 0\n"
 	if err := os.WriteFile(bin, []byte(script), 0o700); err != nil {
 		t.Fatalf("write stub virsh: %v", err)
 	}
 	return bin, argLog
+}
+
+// withPasswd returns the ZVM domain with a passwd attribute on its VNC device.
+func withPasswd(pw string) string {
+	return strings.Replace(zvmDomain,
+		"<graphics type='vnc'", "<graphics passwd='"+pw+"' type='vnc'", 1)
+}
+
+// A password written after the VM booted lives in the persistent config only —
+// the running qemu was launched without it and its console stays open. If this
+// reported the persistent state, the UI would show a green "password set"
+// badge over a console anyone on the LAN can still walk into.
+func TestVNCLiveInfoSeesUnprotectedRunningConsole(t *testing.T) {
+	bin, _ := fakeVirsh(t, "running", withPasswd("s3cret"), zvmDomain)
+	c := &Client{Bin: bin, Timeout: 5 * time.Second}
+
+	running, liveHasPw, err := c.VNCLiveInfo("0da603ce")
+	if err != nil {
+		t.Fatalf("VNCLiveInfo: %v", err)
+	}
+	if !running {
+		t.Error("running = false for a domain in state running")
+	}
+	if liveHasPw {
+		t.Error("live console reported as protected, but the running domain " +
+			"has no passwd — this is the state that needs a VM restart")
+	}
+
+	// Once the VM restarts, the live domain carries the password too.
+	bin2, _ := fakeVirsh(t, "running", withPasswd("s3cret"), withPasswd("s3cret"))
+	c2 := &Client{Bin: bin2, Timeout: 5 * time.Second}
+	if _, liveHasPw2, err := c2.VNCLiveInfo("0da603ce"); err != nil || !liveHasPw2 {
+		t.Errorf("after restart: liveHasPassword = %v, err = %v; want true, nil", liveHasPw2, err)
+	}
+}
+
+// A shut-off domain has no live console, so there is nothing to report.
+func TestVNCLiveInfoShutOffDomain(t *testing.T) {
+	bin, _ := fakeVirsh(t, "shut off", zvmDomain, zvmDomain)
+	c := &Client{Bin: bin, Timeout: 5 * time.Second}
+
+	running, _, err := c.VNCLiveInfo("0da603ce")
+	if err != nil {
+		t.Fatalf("VNCLiveInfo: %v", err)
+	}
+	if running {
+		t.Error("running = true for a shut-off domain")
+	}
 }
 
 // A protected console must read back as protected. libvirt masks the graphics
@@ -149,7 +207,7 @@ func fakeVirsh(t *testing.T, dumpXML string) (bin, argLog string) {
 func TestVNCInfoRequestsSecurityInfo(t *testing.T) {
 	protected := strings.Replace(zvmDomain,
 		"<graphics type='vnc'", "<graphics passwd='s3cret' type='vnc'", 1)
-	bin, argLog := fakeVirsh(t, protected)
+	bin, argLog := fakeVirsh(t, "running", protected, protected)
 	c := &Client{Bin: bin, Timeout: 5 * time.Second}
 
 	_, hasPw, _, err := c.VNCInfo("0da603ce")
@@ -173,7 +231,7 @@ func TestVNCInfoRequestsSecurityInfo(t *testing.T) {
 // The read half of SetVNCPassword must be unmasked too: it dumps, edits and
 // re-defines, so a masked dump would round-trip other secrets away as well.
 func TestSetVNCPasswordRequestsSecurityInfo(t *testing.T) {
-	bin, argLog := fakeVirsh(t, zvmDomain)
+	bin, argLog := fakeVirsh(t, "running", zvmDomain, zvmDomain)
 	c := &Client{Bin: bin, Timeout: 5 * time.Second}
 
 	if err := c.SetVNCPassword("0da603ce", "s3cret"); err != nil {

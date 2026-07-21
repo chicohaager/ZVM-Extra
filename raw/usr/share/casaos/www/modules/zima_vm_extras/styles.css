@@ -267,6 +267,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 }
 .badge-current { background: var(--success-tint); color: var(--success); }
 .badge-danger  { background: var(--danger-tint); color: var(--danger); }
+.badge-warn    { background: var(--warn-tint); color: var(--warn); }
 
 .vm-meta { color: var(--text-muted); font-size: 12px; margin-top: 6px; }
 .vm-sub {

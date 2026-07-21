@@ -139,6 +139,37 @@ func (c *Client) VNCHasPassword(domain string) (bool, error) {
 	return hasPw, nil
 }
 
+// VNCLiveInfo reports the VNC console state of the *running* instance, which
+// is not the same thing as the persistent config: qemu is launched with the
+// graphics options the domain had at start time, so a password written after
+// boot sits in the persistent config while the live console still accepts
+// anyone. Reporting only the persistent state would put a green
+// "password set" badge over a console that is wide open right now.
+//
+// running is false for a domain that is not running, in which case there is no
+// live console to report on and hasPassword is meaningless.
+func (c *Client) VNCLiveInfo(domain string) (running, hasPassword bool, err error) {
+	state, err := c.State(domain)
+	if err != nil {
+		return false, false, err
+	}
+	if state != "running" {
+		return false, false, nil
+	}
+	// Without --inactive this dumps the live domain; --security-info is as
+	// necessary here as everywhere else (see the note at the top of the file).
+	out, err := c.run("dumpxml", "--security-info", domain)
+	if err != nil {
+		return false, false, err
+	}
+	present, hasPw, _ := vncGraphicsInfo(out)
+	if !present {
+		// No console at all — nothing is exposed, so treat it as protected.
+		return true, true, nil
+	}
+	return true, hasPw, nil
+}
+
 // SetVNCPassword sets (pw != "") or clears (pw == "") the VNC console password
 // in the domain's persistent config. It is applied with `virsh define`, which
 // only rewrites the persistent configuration and never disturbs a running VM;

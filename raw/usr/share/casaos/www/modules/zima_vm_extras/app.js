@@ -620,12 +620,27 @@ function vncCard(vm, st) {
     return card;
   }
 
-  const badge = st.protected
-    ? '<span class="badge badge-current">password set</span>'
-    : '<span class="badge badge-danger">exposed — no password</span>';
-  const desc = st.protected
-    ? 'A VNC password is set. VM Extras re-applies it if the ZVM UI strips it.'
-    : 'Anyone on the LAN can open this VM\'s console without a password.';
+  // Three states, not two. The password is written to the persistent config,
+  // which the running qemu never re-reads — so between setting it and the next
+  // VM start the config says "protected" while the live console still lets
+  // anyone in. Showing that as a plain green "password set" would be a green
+  // badge over an open door.
+  let badge, desc;
+  if (st.live_error) {
+    badge = '<span class="badge badge-danger">live state unknown</span>';
+    desc = 'Could not read the running console\'s state: ' + escapeHtml(st.live_error);
+  } else if (st.restart_required) {
+    badge = '<span class="badge badge-warn">restart required</span>';
+    desc = 'The password is saved in the VM config, but the console that is ' +
+      'running right now still started without one and remains open to the ' +
+      'LAN. Restart the VM to close it.';
+  } else if (st.protected) {
+    badge = '<span class="badge badge-current">password set</span>';
+    desc = 'A VNC password is set. VM Extras re-applies it if the ZVM UI strips it.';
+  } else {
+    badge = '<span class="badge badge-danger">exposed — no password</span>';
+    desc = 'Anyone on the LAN can open this VM\'s console without a password.';
+  }
 
   card.innerHTML = `
     <div class="usb-info">

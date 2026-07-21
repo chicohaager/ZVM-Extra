@@ -5,7 +5,7 @@ It adds the day-to-day operational features the official UI lacks, without
 touching the ZVM frontend — it installs as a separate `zima_vm_extras.raw`
 sysext with its own **VM Extras** tile on the ZimaOS dashboard.
 
-> Status: **v0.5.1** — verified on ZimaOS **1.7.0-beta1** (kernel 6.18.9,
+> Status: **v0.5.2** — verified on ZimaOS **1.7.0-beta1** (kernel 6.18.9,
 > virtqemud / libvirt 10, qemu 9).
 >
 > **v0.5.x adds the VNC security tab.** ZVM generates every VM's console as
@@ -21,6 +21,15 @@ sysext with its own **VM Extras** tile on the ZimaOS dashboard.
 > console reported itself as *unprotected* — the tab showed the wrong state and
 > the reconciler re-defined the domain once a minute forever, because the
 > password it had just written kept reading back as absent.
+>
+> **v0.5.2** stops the tab from reporting a console as safe while it is still
+> open. The password goes into the persistent config, which the running qemu
+> never re-reads, so between setting it and the next VM start the config says
+> "protected" while the live console still lets anyone in. The tab now reads
+> the running domain separately and shows three states: **exposed** (no
+> password anywhere), **restart required** (saved, but the running console
+> started without it), and **password set** (the live console really does ask
+> for one).
 
 ## Features
 
@@ -30,7 +39,7 @@ sysext with its own **VM Extras** tile on the ZimaOS dashboard.
 | **Snapshots** | Create / revert / delete per VM. Running VMs get a full external snapshot (disk **+ memory state**) so it is genuinely revertable; shut-off VMs get a quick internal snapshot. An optional **schedule** takes periodic snapshots with retention. |
 | **USB passthrough** | Pass a host USB device into a VM from the GUI — no manual XML. *Persistent* devices are re-applied automatically if the ZVM UI strips them on re-save, and across host reboots. |
 | **PCIe passthrough** | Pass a host PCI device through via VFIO. Shows IOMMU groups and the current host driver; bridges are blocked. Same persistence/reconcile as USB. |
-| **VNC security** | Shows each VM's console listen address and whether it is password-protected, and sets a console password. ZVM leaves consoles open to the whole LAN with no authentication; a reconciler re-applies the password whenever ZVM strips it. Takes effect at the VM's next start. |
+| **VNC security** | Shows each VM's console listen address and whether it is password-protected, and sets a console password. ZVM leaves consoles open to the whole LAN with no authentication; a reconciler re-applies the password whenever ZVM strips it. Distinguishes a saved password from an *effective* one — a console keeps running without it until the VM restarts, and the tab says so instead of showing green. |
 | **Metrics** | Live per-VM CPU, memory, disk and network, sampled from libvirt. |
 | **Backup** | Export a VM — domain XML + disk image(s) — as a standalone compact qcow2, asynchronously. |
 | **Network** | Switch a VM's NIC to another libvirt network and change its model — config-only, never touches host bridges. |
