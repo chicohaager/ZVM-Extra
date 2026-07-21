@@ -85,6 +85,16 @@ sysext with its own **VM Extras** tile on the ZimaOS dashboard.
 
 ![USB passthrough](images-for-github/usb-passthrough.png)
 
+**VNC security** — a console the way ZVM leaves it: reachable from the whole
+LAN, no password.
+
+![VNC security](images-for-github/vnc-security.png)
+
+**TPM & Secure Boot** — a TPM 2.0 device added and pinned against ZVM re-saves.
+Secure Boot is reported, never switched.
+
+![TPM & Secure Boot](images-for-github/tpm-secure-boot.png)
+
 ## Security model
 
 The daemon binds **`127.0.0.1` only** and registers a reverse-proxy route
@@ -132,10 +142,12 @@ a static UI under `/usr/share/casaos/www/modules/`, and a systemd service.
 - **libvirt access** — subprocess to `/usr/bin/virsh` (stable interface, no
   header-coupled cgo).
 - **State** — `/DATA/AppData/zima-vm-extras/`, survives reboots and OS
-  upgrades: `autostart.json`, `usb.json`, `pci.json`, `mounts.json`,
-  `snapshots/`.
-- **Reconcilers** — background loops keep pinned USB/PCI passthroughs present
-  in each VM's persistent config.
+  upgrades: `autostart.json`, `usb.json`, `pci.json`, `vnc.json`, `tpm.json`,
+  `schedule.json`, `mounts.json`, `snapshots/`.
+- **Reconcilers** — four background loops, each on a 60-second tick, keep the
+  pinned USB and PCI passthroughs, the VNC console password and the TPM device
+  present in each VM's persistent config, because the ZVM UI drops them on a
+  re-save.
 
 ## API
 
@@ -160,6 +172,12 @@ All endpoints are served under `/api` (reachable via the gateway at
 | GET    | `/api/pci/<vm>/pinned`              | pinned PCI devices of a VM |
 | POST   | `/api/pci/<vm>`                     | attach PCI device |
 | DELETE | `/api/pci/<vm>/<address>`           | detach PCI device |
+| GET    | `/api/vnc/<vm>`                     | console state: saved password, *live* password, listen address, pinned |
+| POST   | `/api/vnc/<vm>`                     | set the console password (1–8 chars) and pin it |
+| DELETE | `/api/vnc/<vm>`                     | remove the console password and the pin |
+| GET    | `/api/tpm/<vm>`                     | TPM state (saved + running) and firmware / Secure Boot info |
+| POST   | `/api/tpm/<vm>`                     | add a TPM 2.0 emulator device and pin it |
+| DELETE | `/api/tpm/<vm>`                     | remove the TPM device and the pin |
 | GET    | `/api/storage/targets`              | writable filesystems for snapshot storage |
 | GET/POST | `/api/mounts`                     | list / create remote mounts |
 | GET/PUT/DELETE | `/api/mounts/<id>`          | manage a remote mount |
@@ -210,7 +228,8 @@ Removes the sysext, the watchdog units and the gateway route. State under
 
 The original roadmap — live metrics, a VM watchdog, scheduled snapshots,
 backup/export and network switching — all shipped in v0.4.0; console password
-protection shipped in v0.5.x. Possible future additions: compressed backup
+protection shipped in v0.5.x, the TPM 2.0 device in v0.6.x. Possible future
+additions: compressed backup
 archives, an optional JWT auth layer in front of the API, and further
 reconcilers for the defaults ZVM gets wrong on Linux guests (it stamps every
 VM `os_type=windows`, which drags in `clock offset='localtime'` and Hyper-V
