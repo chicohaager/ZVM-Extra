@@ -31,6 +31,7 @@ import (
 	"github.com/chicohaager/zima-vm-extras/internal/schedule"
 	"github.com/chicohaager/zima-vm-extras/internal/usb"
 	"github.com/chicohaager/zima-vm-extras/internal/virsh"
+	"github.com/chicohaager/zima-vm-extras/internal/vnc"
 	"github.com/chicohaager/zima-vm-extras/internal/watchdog"
 )
 
@@ -72,6 +73,11 @@ func main() {
 		log.Fatalf("open schedule store: %v", err)
 	}
 
+	vncStore, err := vnc.NewStore(filepath.Join(cfg.DataDir, "vnc.json"))
+	if err != nil {
+		log.Fatalf("open vnc store: %v", err)
+	}
+
 	backupMgr := backup.NewManager(vc, log.Printf)
 
 	// Re-mount everything tagged AutoMount=true. Best effort; errors are logged.
@@ -81,7 +87,7 @@ func main() {
 	// Runs once per boot (guarded by a tmpfs marker).
 	go store.Run(vc, log.Printf)
 
-	srv := handlers.NewServer(vc, store, mountMgr, usbStore, pciStore, schedStore, backupMgr, snapRoot)
+	srv := handlers.NewServer(vc, store, mountMgr, usbStore, pciStore, schedStore, backupMgr, vncStore, snapRoot)
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", srv.Routes())
@@ -153,6 +159,10 @@ func main() {
 	// that the official ZVM UI stripped from a domain's persistent config.
 	go usbStore.RunReconciler(ctx, vc, 60*time.Second, log.Printf)
 	go pciStore.RunReconciler(ctx, vc, 60*time.Second, log.Printf)
+
+	// Keep pinned VNC console passwords applied: re-set any the ZVM UI
+	// stripped, so a VM's console never falls back to open LAN access.
+	go vncStore.RunReconciler(ctx, vc, 60*time.Second, log.Printf)
 
 	// Keep watchdog-enabled VMs running.
 	go store.RunWatchdog(ctx, vc, 30*time.Second, log.Printf)

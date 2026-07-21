@@ -21,6 +21,7 @@ import (
 	"github.com/chicohaager/zima-vm-extras/internal/storage"
 	"github.com/chicohaager/zima-vm-extras/internal/usb"
 	"github.com/chicohaager/zima-vm-extras/internal/virsh"
+	"github.com/chicohaager/zima-vm-extras/internal/vnc"
 )
 
 type Server struct {
@@ -31,11 +32,12 @@ type Server struct {
 	PCI          *pci.Store
 	Sched        *schedule.Store
 	Backup       *backup.Manager
+	VNC          *vnc.Store
 	SnapshotRoot string // base dir for external-snapshot files, e.g. /DATA/AppData/zima-vm-extras/snapshots
 }
 
-func NewServer(v *virsh.Client, st *autostart.Store, mm *mounts.Manager, us *usb.Store, pc *pci.Store, sc *schedule.Store, bk *backup.Manager, snapshotRoot string) *Server {
-	return &Server{Virsh: v, Auto: st, Mounts: mm, USB: us, PCI: pc, Sched: sc, Backup: bk, SnapshotRoot: snapshotRoot}
+func NewServer(v *virsh.Client, st *autostart.Store, mm *mounts.Manager, us *usb.Store, pc *pci.Store, sc *schedule.Store, bk *backup.Manager, vn *vnc.Store, snapshotRoot string) *Server {
+	return &Server{Virsh: v, Auto: st, Mounts: mm, USB: us, PCI: pc, Sched: sc, Backup: bk, VNC: vn, SnapshotRoot: snapshotRoot}
 }
 
 // Routes returns a mux with all API endpoints mounted under /api.
@@ -60,6 +62,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("/api/backup/", s.backupItem)
 	mux.HandleFunc("/api/net/networks", s.netNetworks)
 	mux.HandleFunc("/api/net/", s.netDomain)
+	mux.HandleFunc("/api/vnc/", s.vncDomain)
 	mux.HandleFunc("/api/mounts", s.mountsCollection)
 	mux.HandleFunc("/api/mounts/", s.mountsItem)
 	return mux
@@ -1062,4 +1065,77 @@ func (s *Server) netDomain(w http.ResponseWriter, r *http.Request) {
 	}
 
 	writeErr(w, 405, "method not allowed")
+}
+
+// ---------- VNC console password ----------
+
+// vncDomain routes the per-VM VNC console password:
+//
+//	GET    /api/vnc/<vm>  — status {present, protected, listen, pinned}
+//	POST   /api/vnc/<vm>  — set the password (body: {password}) and pin it
+//	DELETE /api/vnc/<vm>  — clear the password and unpin
+//
+// Setting a password only edits the persistent domain config, so it never
+// disturbs a running VM; it takes effect on the next VM start. A persistent
+// set also pins the password so the reconciler re-applies it whenever the
+// official ZVM UI strips it on a re-save.
+func (s *Server) vncDomain(w http.ResponseWriter, r *http.Request) {
+	vm := strings.TrimSuffix(strings.TrimPrefix(r.URL.Path, "/api/vnc/"), "/")
+	if vm == "" {
+		writeErr(w, 400, "vm name required")
+		return
+	}
+	if !validName(vm) {
+		writeErr(w, 400, "invalid vm name")
+		return
+	}
+
+	switch r.Method {
+	case "GET":
+		present, hasPw, listen, err := s.Virsh.VNCInfo(vm)
+		if err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		_, pinned := s.VNC.Get(vm)
+		writeJSON(w, 200, map[string]any{
+			"vm": vm, "present": present, "protected": hasPw,
+			"listen": listen, "pinned": pinned,
+		})
+
+	case "POST":
+		var in struct {
+			Password string `json:"password"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		if !vnc.ValidPassword(in.Password) {
+			writeErr(w, 400, "password must be 1–8 characters, printable ASCII, without quotes or <>&")
+			return
+		}
+		if err := s.Virsh.SetVNCPassword(vm, in.Password); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		// Pin it so the reconciler keeps it applied across ZVM re-saves.
+		if err := s.VNC.Set(vnc.Entry{VM: vm, Password: in.Password}); err != nil {
+			writeErr(w, 500, "password set, but pinning failed: "+err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]any{"protected": true, "note": "takes effect on next VM start"})
+
+	case "DELETE":
+		// Unpin first so the reconciler will not immediately re-apply it.
+		_ = s.VNC.Remove(vm)
+		if err := s.Virsh.SetVNCPassword(vm, ""); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, map[string]bool{"cleared": true})
+
+	default:
+		writeErr(w, 405, "method not allowed")
+	}
 }

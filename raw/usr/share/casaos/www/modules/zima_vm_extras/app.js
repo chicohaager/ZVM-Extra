@@ -124,7 +124,7 @@ function renderStatusBar() {
 }
 
 function populateVMSelects() {
-  for (const id of ['snap-vm-select', 'usb-vm-select', 'pci-vm-select', 'metrics-vm-select', 'backup-vm-select', 'net-vm-select']) {
+  for (const id of ['snap-vm-select', 'usb-vm-select', 'pci-vm-select', 'vnc-vm-select', 'metrics-vm-select', 'backup-vm-select', 'net-vm-select']) {
     const sel = $('#' + id);
     if (!sel) continue;
     const prev = sel.value;
@@ -583,6 +583,94 @@ function pciRow(dev, pinned) {
   return row;
 }
 
+// ---------- VNC SECURITY ----------
+
+async function renderVNCTab() {
+  await loadVMs();
+  const sel = $('#vnc-vm-select');
+  if (!sel.value && vmCache.length) sel.value = vmCache[0].name;
+  await renderVNCForCurrentVM();
+}
+
+async function renderVNCForCurrentVM() {
+  const body = $('#vnc-body');
+  const vm = $('#vnc-vm-select').value;
+  if (!vm) { body.innerHTML = '<div class="empty">No VM selected.</div>'; return; }
+  body.innerHTML = '<div class="loading">Loading…</div>';
+  try {
+    const st = await api(`/vnc/${encodeURIComponent(vm)}`);
+    body.innerHTML = '';
+    body.appendChild(vncCard(vm, st));
+  } catch (e) {
+    body.innerHTML = `<div class="empty">Error: ${escapeHtml(e.message)}</div>`;
+  }
+}
+
+function vncCard(vm, st) {
+  const card = document.createElement('div');
+  card.className = 'usb-row card';
+
+  // A VM with no VNC graphics device — nothing to protect.
+  if (!st.present) {
+    card.innerHTML = `
+      <div class="usb-info">
+        <div class="usb-id">No VNC console</div>
+        <div class="usb-desc">This VM has no VNC graphics device — nothing to secure here.</div>
+      </div>`;
+    return card;
+  }
+
+  const badge = st.protected
+    ? '<span class="badge badge-current">password set</span>'
+    : '<span class="badge badge-danger">exposed — no password</span>';
+  const desc = st.protected
+    ? 'A VNC password is set. VM Extras re-applies it if the ZVM UI strips it.'
+    : 'Anyone on the LAN can open this VM\'s console without a password.';
+
+  card.innerHTML = `
+    <div class="usb-info">
+      <div class="usb-id">VNC console ${badge}</div>
+      <div class="usb-desc">${desc}</div>
+      <div class="usb-meta">listen address: ${escapeHtml(st.listen || '(default)')}${st.pinned ? ' · pinned by VM Extras' : ''}</div>
+    </div>
+    <div class="usb-actions">
+      <input type="password" class="vnc-pw" placeholder="1–8 characters" maxlength="8" autocomplete="new-password">
+      <button class="btn-primary" data-act="set">${st.protected ? 'Change password' : 'Set password'}</button>
+      ${st.protected ? '<button class="btn-danger" data-act="clear">Remove</button>' : ''}
+    </div>
+  `;
+
+  card.querySelector('[data-act="set"]').addEventListener('click', async () => {
+    const pw = card.querySelector('.vnc-pw').value;
+    if (!pw) { setStatus('Enter a password', 'error'); return; }
+    if (pw.length > 8) { setStatus('VNC passwords are limited to 8 characters', 'error'); return; }
+    try {
+      const res = await api(`/vnc/${encodeURIComponent(vm)}`, {
+        method: 'POST',
+        body: JSON.stringify({ password: pw }),
+      });
+      setStatus(res.note ? `VNC password set — ${res.note}` : 'VNC password set', 'ok');
+      renderVNCForCurrentVM();
+    } catch (e) {
+      setStatus(`Failed: ${e.message}`, 'error');
+    }
+  });
+
+  const clearBtn = card.querySelector('[data-act="clear"]');
+  if (clearBtn) clearBtn.addEventListener('click', async () => {
+    if (!confirm(`Remove the VNC password from "${vm}"?\n\nThe console will be open on the LAN again with no authentication.`)) return;
+    try {
+      await api(`/vnc/${encodeURIComponent(vm)}`, { method: 'DELETE' });
+      setStatus('VNC password removed', 'ok');
+      renderVNCForCurrentVM();
+    } catch (e) {
+      setStatus(`Failed: ${e.message}`, 'error');
+    }
+  });
+
+  return card;
+}
+
 // ---------- METRICS ----------
 
 let metricsTimer = null;
@@ -626,10 +714,10 @@ function fmtRate(r) {
 }
 
 function metricCard(label, value, sub) {
-  return `<div class="card" style="flex:1 1 150px;padding:14px">
-    <div style="font-size:.72rem;text-transform:uppercase;letter-spacing:.04em;opacity:.6">${label}</div>
-    <div style="font-size:1.5rem;font-weight:600;margin:.2rem 0">${value}</div>
-    <div style="font-size:.8rem;opacity:.7">${sub || '&nbsp;'}</div>
+  return `<div class="metric-card">
+    <div class="metric-lbl">${label}</div>
+    <div class="metric-num">${value}</div>
+    <div class="metric-sub">${sub || '&nbsp;'}</div>
   </div>`;
 }
 
@@ -665,7 +753,7 @@ function renderMetrics(m) {
     cards.push(metricCard(`Disk · ${escapeHtml(b.name)}`,
       `R ${fmtRate(rd)}`, `W ${fmtRate(wr)}`));
   }
-  body.innerHTML = `<div style="display:flex;flex-wrap:wrap;gap:12px">${cards.join('')}</div>`;
+  body.innerHTML = `<div class="metric-grid">${cards.join('')}</div>`;
   metricsPrev = m;
 }
 
@@ -917,6 +1005,7 @@ function switchTab(name) {
   else if (name === 'snapshots') renderSnapshotsTab();
   else if (name === 'usb') renderUSBTab();
   else if (name === 'pci') renderPCITab();
+  else if (name === 'vnc') renderVNCTab();
   else if (name === 'metrics') renderMetricsTab();
   else if (name === 'backup') renderBackupTab();
   else if (name === 'network') renderNetworkTab();
@@ -932,6 +1021,7 @@ document.addEventListener('DOMContentLoaded', () => {
   $('#snap-vm-select').addEventListener('change', renderSnapshotsForCurrentVM);
   $('#usb-vm-select').addEventListener('change', renderUSBTab);
   $('#pci-vm-select').addEventListener('change', renderPCITab);
+  $('#vnc-vm-select').addEventListener('change', renderVNCForCurrentVM);
   $('#metrics-vm-select').addEventListener('change', () => { metricsPrev = null; pollMetrics(); });
   $('#net-vm-select').addEventListener('change', renderNICsForCurrentVM);
   $('#snap-external').addEventListener('change', updateExtDirVisibility);

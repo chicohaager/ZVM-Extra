@@ -5,8 +5,22 @@ It adds the day-to-day operational features the official UI lacks, without
 touching the ZVM frontend — it installs as a separate `zima_vm_extras.raw`
 sysext with its own **VM Extras** tile on the ZimaOS dashboard.
 
-> Status: **v0.4.0** — verified on ZimaOS 1.6.1 (kernel 6.12, virtqemud /
-> libvirt 10, qemu 9).
+> Status: **v0.5.1** — verified on ZimaOS **1.7.0-beta1** (kernel 6.18.9,
+> virtqemud / libvirt 10, qemu 9).
+>
+> **v0.5.x adds the VNC security tab.** ZVM generates every VM's console as
+> `<graphics type='vnc' listen='::'>` with **no password**, so anyone on the
+> LAN can take over a VM's screen and keyboard with a plain VNC viewer. This
+> tab sets a console password on the domain and a reconciler keeps it there
+> when ZVM re-saves the domain and strips it. The password applies at the VM's
+> **next start** — `virsh define` rewrites the persistent config and never
+> disturbs a running VM.
+>
+> **v0.5.1** fixes the read-back of that password: `virsh dumpxml` masks the
+> `passwd` attribute unless it is given `--security-info`, so a protected
+> console reported itself as *unprotected* — the tab showed the wrong state and
+> the reconciler re-defined the domain once a minute forever, because the
+> password it had just written kept reading back as absent.
 
 ## Features
 
@@ -16,6 +30,7 @@ sysext with its own **VM Extras** tile on the ZimaOS dashboard.
 | **Snapshots** | Create / revert / delete per VM. Running VMs get a full external snapshot (disk **+ memory state**) so it is genuinely revertable; shut-off VMs get a quick internal snapshot. An optional **schedule** takes periodic snapshots with retention. |
 | **USB passthrough** | Pass a host USB device into a VM from the GUI — no manual XML. *Persistent* devices are re-applied automatically if the ZVM UI strips them on re-save, and across host reboots. |
 | **PCIe passthrough** | Pass a host PCI device through via VFIO. Shows IOMMU groups and the current host driver; bridges are blocked. Same persistence/reconcile as USB. |
+| **VNC security** | Shows each VM's console listen address and whether it is password-protected, and sets a console password. ZVM leaves consoles open to the whole LAN with no authentication; a reconciler re-applies the password whenever ZVM strips it. Takes effect at the VM's next start. |
 | **Metrics** | Live per-VM CPU, memory, disk and network, sampled from libvirt. |
 | **Backup** | Export a VM — domain XML + disk image(s) — as a standalone compact qcow2, asynchronously. |
 | **Network** | Switch a VM's NIC to another libvirt network and change its model — config-only, never touches host bridges. |
@@ -44,7 +59,7 @@ is never exposed on the LAN on a port of its own.
 
 ## Requirements
 
-- ZimaOS **1.6.1+** with a working ZVM install.
+- ZimaOS **1.6.1+** with a working ZVM install. Tested on 1.6.1 and 1.7.0-beta1.
 - For **PCIe passthrough**: `intel_iommu=on` (or `amd_iommu=on`) on the kernel
   cmdline — ZimaCube images ship with this already set.
 
@@ -54,11 +69,13 @@ is never exposed on the LAN on a port of its own.
 # On a build host (Linux, amd64) — needs go 1.22+ and squashfs-tools:
 ./build.sh                       # produces dist/zima_vm_extras.raw
 
-# On the ZimaOS device, as root:
-scp dist/zima_vm_extras.raw root@<zimaos>:/var/lib/extensions/
-ssh root@<zimaos> 'systemd-sysext refresh && \
-                   systemctl daemon-reload && \
-                   systemctl enable --now zima-vm-extras.service'
+# Copy it to the device. ZimaOS disables root SSH login (`PermitRootLogin no`),
+# so this goes through your admin account and sudo:
+scp dist/zima_vm_extras.raw <user>@<zimaos>:/tmp/
+ssh <user>@<zimaos> 'sudo install -m 644 /tmp/zima_vm_extras.raw /var/lib/extensions/ && \
+                     sudo systemd-sysext refresh && \
+                     sudo systemctl daemon-reload && \
+                     sudo systemctl enable --now zima-vm-extras.service'
 ```
 
 Or run `sudo ./install.sh` on the device after `build.sh`. Then open the
@@ -157,9 +174,12 @@ Removes the sysext, the watchdog units and the gateway route. State under
 ## Roadmap
 
 The original roadmap — live metrics, a VM watchdog, scheduled snapshots,
-backup/export and network switching — all shipped in v0.4.0. Possible future
-additions: compressed backup archives and an optional JWT auth layer in
-front of the API.
+backup/export and network switching — all shipped in v0.4.0; console password
+protection shipped in v0.5.x. Possible future additions: compressed backup
+archives, an optional JWT auth layer in front of the API, and further
+reconcilers for the defaults ZVM gets wrong on Linux guests (it stamps every
+VM `os_type=windows`, which drags in `clock offset='localtime'` and Hyper-V
+enlightenments, and it leaves the installer ISO attached and bootable).
 
 ## License
 
