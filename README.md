@@ -9,12 +9,16 @@ sysext with its own **VM Extras** tile on the ZimaOS dashboard.
 > virtqemud / libvirt 10, qemu 9).
 >
 > **v0.7.0 is a bug-fix and quality-of-life release** from community feedback
-> on v0.6.3: snapshots whose name contains a space can be deleted and reverted
-> again, the Metrics tab no longer reports every VM at 100 % memory, the
-> snapshot storage target explains itself instead of disappearing for a
-> shut-off VM, VMs can be started and stopped from the Autostart tab, the
-> backup and snapshot target directories are remembered, and the Metrics tab
-> draws a short history per value. Details in the sections below.
+> on v0.6.3. Fixed: snapshots whose name contains a space could be created and
+> then neither deleted nor reverted; the Metrics tab reported every VM at 100 %
+> memory, because it divided the balloon's target size by itself; the snapshot
+> storage target vanished for a shut-off VM instead of saying why; and the
+> external target directory did not follow the VM picker, so an external
+> snapshot of VM B could land in VM A's directory. Added: power controls on the
+> Autostart tab, remembered backup and snapshot target directories, a short
+> history sparkline per metric, and a PCIe list that hides the two thirds of a
+> host's devices that can never be passed through. Details in the sections
+> below.
 >
 > **v0.6.x adds the TPM & Secure Boot tab.** Windows 11 refuses to install
 > without a TPM 2.0. ZVM has a Windows-11-specific code path for this — its
@@ -71,7 +75,7 @@ sysext with its own **VM Extras** tile on the ZimaOS dashboard.
 | **Autostart** | Starts VMs on host boot, orchestrated by the daemon — per-VM **order** and **delay** so VMs come up in sequence. An optional per-VM **watchdog** restarts a VM if it stops or crashes. Also carries the **power controls**: start, ACPI shut down, reboot, resume, and a confirmed force-off. |
 | **Snapshots** | Create / revert / delete per VM. Running VMs get a full external snapshot (disk **+ memory state**) so it is genuinely revertable; shut-off VMs get a quick internal snapshot. An optional **schedule** takes periodic snapshots with retention. |
 | **USB passthrough** | Pass a host USB device into a VM from the GUI — no manual XML. *Persistent* devices are re-applied automatically if the ZVM UI strips them on re-save, and across host reboots. |
-| **PCIe passthrough** | Pass a host PCI device through via VFIO. Shows IOMMU groups and the current host driver; bridges are blocked. Same persistence/reconcile as USB. |
+| **PCIe passthrough** | Pass a host PCI device through via VFIO. Shows IOMMU groups and the current host driver. Bridges and devices without an IOMMU group cannot be passed and are hidden behind a toggle, so the list shows candidates rather than the whole bus. Same persistence/reconcile as USB. |
 | **VNC security** | Shows each VM's console listen address and whether it is password-protected, and sets a console password. ZVM leaves consoles open to the whole LAN with no authentication; a reconciler re-applies the password whenever ZVM strips it. Distinguishes a saved password from an *effective* one — a console keeps running without it until the VM restarts, and the tab says so instead of showing green. |
 | **TPM & Secure Boot** | Adds a TPM 2.0 emulator device so Windows 11 will install, and pins it against ZVM re-saves. Reports the saved device and the *running* one separately — a TPM added to a running VM only counts after a restart. Secure Boot status is shown but deliberately not switched: the firmware and its NVRAM file are a matched pair, and repointing an existing VM can leave it unbootable. |
 | **Metrics** | Live per-VM CPU, memory, disk and network, sampled from libvirt, each with a short in-page history sparkline. Memory is reported as *in-guest usage* where the guest's virtio-balloon driver provides it, and honestly labelled **allocated** where it does not — the balloon's target size equals the configured maximum on an uninflated balloon, which is why v0.6.3 showed every VM at 100 %. |
@@ -81,7 +85,7 @@ sysext with its own **VM Extras** tile on the ZimaOS dashboard.
 
 ## Screenshots
 
-**Dashboard — VM overview & autostart**
+**Dashboard — VM overview, power control & autostart**
 
 ![Dashboard](images-for-github/dashboard.png)
 
@@ -92,6 +96,16 @@ sysext with its own **VM Extras** tile on the ZimaOS dashboard.
 **USB passthrough**
 
 ![USB passthrough](images-for-github/usb-passthrough.png)
+
+**PCIe passthrough** — bridges and devices without an IOMMU group are hidden by
+default; on this ZimaCube that is 24 of 41 entries. One checkbox brings them back.
+
+![PCIe passthrough](images-for-github/pcie-passthrough.png)
+
+**Metrics** — memory is the guest's own figure, not the balloon's target size,
+with a short history per value.
+
+![Metrics](images-for-github/metrics.png)
 
 **VNC security** — a console the way ZVM leaves it: reachable from the whole
 LAN, no password.

@@ -315,6 +315,10 @@ async function renderAutostartTab() {
 
 // ---------- SNAPSHOTS ----------
 
+// The last value this code auto-filled into #snap-extdir. Anything else in
+// that field was typed or picked by the operator and is never overwritten.
+let snapExtDirAuto = '';
+
 async function renderSnapshotsForCurrentVM() {
   const list = $('#snap-list');
   const sel = $('#snap-vm-select');
@@ -340,10 +344,27 @@ async function renderSnapshotsForCurrentVM() {
     }
     if (r.default_external_dir) {
       extDirInput.placeholder = r.default_external_dir;
-      if (!extDirInput.value) extDirInput.value = r.default_external_dir;
+      // The target directory ends in the VM's own name, so it has to follow
+      // the VM picker. The old `if (!value)` left the previously selected
+      // VM's path in the field — switch from A to B and B's overlay files
+      // would have been written into A's directory. A path the operator typed
+      // themselves is still left alone: only a value this code put there is
+      // replaced.
+      if (!extDirInput.value || extDirInput.value === snapExtDirAuto) {
+        extDirInput.value = r.default_external_dir;
+        snapExtDirAuto = r.default_external_dir;
+      }
     }
     // Sync the storage dropdown to the prefix of the current path (if it matches a known mount).
     syncStorageSelectionFromPath();
+    // If a real mount is selected, recompose the path for the VM now shown —
+    // the per-VM subdirectory has to change with the picker, and without a
+    // focus steal, since this runs on render rather than on a click.
+    const storageSel = $('#snap-storage-select');
+    if (storageSel && storageSel.value && storageSel.value !== '__custom__'
+        && (extDirInput.value === snapExtDirAuto || !extDirInput.value)) {
+      applyStorageSelection(false);
+    }
     updateExtDirVisibility();
     list.innerHTML = '';
     if (!r.data || r.data.length === 0) {
@@ -428,20 +449,22 @@ function updateExtDirVisibility() {
 }
 
 // When the user picks a storage target, rewrite extDirInput to that mount + /zima-vm-extras-snapshots/<vm>.
-function applyStorageSelection() {
+function applyStorageSelection(focusOnCustom = true) {
   const sel = $('#snap-storage-select');
   const ext = $('#snap-extdir');
   const vm = $('#snap-vm-select').value;
   if (!sel || !ext) return;
   if (sel.value === '__custom__') {
     ext.removeAttribute('readonly');
-    ext.focus();
+    if (focusOnCustom) ext.focus();
     return;
   }
   if (sel.value) {
     const base = sel.value.replace(/\/+$/, '');
     ext.value = `${base}/zima-vm-extras-snapshots/${vm || ''}`.replace(/\/+$/, '/');
     if (!vm) ext.value = `${base}/zima-vm-extras-snapshots/`;
+    // Composed by us, so a later VM switch may recompose it.
+    snapExtDirAuto = ext.value;
     ext.setAttribute('readonly', 'readonly');
   }
 }
