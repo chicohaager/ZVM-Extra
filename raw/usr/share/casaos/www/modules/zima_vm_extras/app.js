@@ -141,6 +141,75 @@ function populateVMSelects() {
   }
 }
 
+// ---------- POWER ----------
+
+// Which buttons make sense depends on the state libvirt reports. "Force off"
+// is the plug-pull and always asks first; "Shut down" and "Reboot" are ACPI
+// requests a guest is free to ignore, so the row is re-read afterwards rather
+// than assuming the VM obeyed.
+const POWER_ACTIONS = {
+  'shut off': [{ act: 'start', label: 'Start', cls: 'btn-primary' }],
+  'shutoff': [{ act: 'start', label: 'Start', cls: 'btn-primary' }],
+  'running': [
+    { act: 'shutdown', label: 'Shut down', cls: 'btn-secondary', stops: true },
+    { act: 'reboot', label: 'Reboot', cls: 'btn-secondary' },
+    { act: 'force-off', label: 'Force off', cls: 'btn-danger', confirm: true, stops: true },
+  ],
+  'paused': [
+    { act: 'resume', label: 'Resume', cls: 'btn-primary' },
+    { act: 'force-off', label: 'Force off', cls: 'btn-danger', confirm: true, stops: true },
+  ],
+};
+
+function powerControls(vm) {
+  const wrap = document.createElement('div');
+  wrap.className = 'vm-power';
+  const actions = POWER_ACTIONS[vm.state] || [];
+  if (!actions.length) {
+    wrap.innerHTML = `<span class="vm-power-none" title="No power action available in state '${escapeHtml(vm.state || '')}'">—</span>`;
+    return wrap;
+  }
+  for (const a of actions) {
+    const btn = document.createElement('button');
+    btn.className = a.cls + ' btn-sm';
+    btn.textContent = a.label;
+    btn.addEventListener('click', async () => {
+      if (a.confirm && !confirm(
+        `Force off "${vmLabel(vm)}"?\n\nThis cuts power immediately — the guest gets no chance ` +
+        `to flush its filesystems, exactly like pulling the plug.`)) return;
+      // A VM whose watchdog is on gets restarted within ~30 s of reaching
+      // "shut off", so a stop request here would appear to do nothing. Say so
+      // before the click rather than letting the user rediscover it.
+      if (a.stops && vm.watchdog && !confirm(
+        `"${vmLabel(vm)}" has its watchdog enabled — VM Extras will restart it within ` +
+        `about 30 seconds of it shutting down.\n\nStop it anyway? Turn the watchdog off ` +
+        `first if you want it to stay down.`)) return;
+      const siblings = Array.from(wrap.querySelectorAll('button'));
+      siblings.forEach(b => { b.disabled = true; });
+      try {
+        const r = await api(`/power/${encodeURIComponent(vm.name)}`, {
+          method: 'POST',
+          body: JSON.stringify({ action: a.act }),
+        });
+        // The reply carries the state as it is right now, which after an ACPI
+        // request is usually still the old one — say so instead of implying
+        // the VM already stopped.
+        setStatus(
+          (a.act === 'shutdown' || a.act === 'reboot')
+            ? `${a.label} requested for ${vmLabel(vm)} — now: ${r.state}`
+            : `${vmLabel(vm)} is now: ${r.state}`,
+          'ok');
+        setTimeout(renderAutostartTab, 1200);
+      } catch (e) {
+        setStatus(`${a.label} failed: ${e.message}`, 'error');
+        siblings.forEach(b => { b.disabled = false; });
+      }
+    });
+    wrap.appendChild(btn);
+  }
+  return wrap;
+}
+
 // ---------- AUTOSTART ----------
 
 function autostartCard(vm) {
@@ -193,7 +262,7 @@ function autostartCard(vm) {
   `;
   const delayInput = delayField.querySelector('input');
 
-  ctrl.append(toggleWrap, wdField, orderField, delayField);
+  ctrl.append(powerControls(vm), toggleWrap, wdField, orderField, delayField);
   card.append(info, ctrl);
 
   const save = debounce(async () => {
@@ -335,10 +404,27 @@ async function renderSnapshotsTab() {
   await renderSnapshotsForCurrentVM();
 }
 
+// The storage target only applies to external snapshots, i.e. to a VM that is
+// running or paused. v0.6.3 hid the whole row for a shut-off VM, which read as
+// "the target picker is broken" rather than "there is nothing to target".
+// The row now stays put and explains itself.
 function updateExtDirVisibility() {
   const row = $('#snap-extdir-row');
   if (!row) return;
-  row.style.display = $('#snap-external').checked ? '' : 'none';
+  const external = $('#snap-external').checked;
+  const note = $('#snap-extdir-note');
+  const sel = $('#snap-storage-select');
+  const ext = $('#snap-extdir');
+
+  if (sel) sel.disabled = !external;
+  if (ext) ext.disabled = !external;
+  row.classList.toggle('is-disabled', !external);
+  if (note) {
+    note.textContent = external
+      ? ''
+      : 'This VM is shut off, so the snapshot is stored inside its own qcow2 image (internal snapshot). '
+        + 'No separate target directory is used. Start or pause the VM to take a full external snapshot instead.';
+  }
 }
 
 // When the user picks a storage target, rewrite extDirInput to that mount + /zima-vm-extras-snapshots/<vm>.
@@ -514,7 +600,40 @@ async function renderPCITab() {
       list.innerHTML = '<div class="empty">No PCI devices found.</div>';
       return;
     }
-    for (const dev of r.data) list.appendChild(pciRow(dev, pinned));
+
+    // A typical AMD host lists dozens of bridges and root complexes that can
+    // never be passed through — they drowned the handful of devices that can.
+    // They are hidden by default, but only ever hidden, never dropped: the
+    // count says how many and one click brings them back. Anything already
+    // pinned to a VM stays visible whatever the filter says.
+    const showAll = $('#pci-show-all').checked;
+    const hasGroup = d => d.iommu_group !== '' && d.iommu_group != null;
+    // VFIO passthrough needs an IOMMU group, so a device without one is not a
+    // candidate either. The guard matters: if IOMMU is switched off in the
+    // firmware, *no* device has a group — filtering on that alone would empty
+    // the list and hide the real problem. So the group rule only applies when
+    // at least one device does have a group.
+    const anyGrouped = r.data.some(hasGroup);
+    const attachable = d => d.passable && (!anyGrouped || hasGroup(d));
+    const shown = r.data.filter(d => showAll || attachable(d) || pinned.has(d.address));
+    const hidden = r.data.length - shown.length;
+
+    const note = $('#pci-filter-note');
+    if (note) {
+      if (!anyGrouped) {
+        note.textContent = 'No device has an IOMMU group — IOMMU/VT-d looks disabled in the host firmware, '
+          + 'so nothing can be passed through until it is enabled.';
+      } else {
+        note.textContent = hidden > 0
+          ? `${hidden} of ${r.data.length} devices hidden — bridges and devices without an IOMMU group, which cannot be passed through.`
+          : '';
+      }
+    }
+    if (shown.length === 0) {
+      list.innerHTML = '<div class="empty">No passable PCI devices on this host.</div>';
+      return;
+    }
+    for (const dev of shown) list.appendChild(pciRow(dev, pinned));
   } catch (e) {
     list.innerHTML = `<div class="empty">Error: ${escapeHtml(e.message)}</div>`;
   }
@@ -836,6 +955,7 @@ function stopMetrics() {
 async function renderMetricsTab() {
   await loadVMs();
   metricsPrev = null;
+  metricsHistory = {};
   const sel = $('#metrics-vm-select');
   if (!sel.value && vmCache.length) sel.value = vmCache[0].name;
   await pollMetrics();
@@ -866,12 +986,92 @@ function fmtRate(r) {
   return fmtBytes(r) + '/s';
 }
 
-function metricCard(label, value, sub) {
+function metricCard(label, value, sub, series, sparkOpts) {
   return `<div class="metric-card">
     <div class="metric-lbl">${label}</div>
     <div class="metric-num">${value}</div>
     <div class="metric-sub">${sub || '&nbsp;'}</div>
+    ${series ? sparkline(series, sparkOpts) : ''}
   </div>`;
+}
+
+// ---------- METRIC HISTORY ----------
+
+// Samples are kept in the page only: HISTORY_LEN points at the 2 s poll
+// interval is a bit over three minutes of scrollback, which is what the
+// sparklines draw. Switching VMs or leaving the tab discards them — there is
+// no server-side time series behind this.
+const HISTORY_LEN = 100;
+let metricsHistory = {}; // key -> array of numbers (nulls allowed for gaps)
+
+function pushHistory(key, value) {
+  if (!metricsHistory[key]) metricsHistory[key] = [];
+  const a = metricsHistory[key];
+  a.push(value);
+  if (a.length > HISTORY_LEN) a.shift();
+  return a;
+}
+
+// sparkline renders a series as an inline SVG polyline, scaled to its own
+// max so a quiet interface still shows its shape. opts.max pins the top of
+// the scale (used for percentages, where 100 is the meaningful ceiling).
+function sparkline(series, opts = {}) {
+  const pts = series.filter(v => v != null && isFinite(v));
+  if (pts.length < 2) return '<div class="spark spark-empty"></div>';
+  const w = 100, h = 24;
+  const max = opts.max != null ? opts.max : Math.max(...pts, 0.0001);
+  const scale = max > 0 ? max : 1;
+  const step = w / (HISTORY_LEN - 1);
+  // Right-align: the newest sample sits at the right edge.
+  const offset = w - (series.length - 1) * step;
+  let d = '';
+  series.forEach((v, i) => {
+    if (v == null || !isFinite(v)) return;
+    const x = (offset + i * step).toFixed(2);
+    const y = (h - Math.min(v / scale, 1) * (h - 2) - 1).toFixed(2);
+    d += (d ? ' L' : 'M') + x + ',' + y;
+  });
+  if (!d) return '<div class="spark spark-empty"></div>';
+  return `<svg class="spark" viewBox="0 0 ${w} ${h}" preserveAspectRatio="none" aria-hidden="true">
+    <path d="${d}" fill="none" stroke="currentColor" stroke-width="1.5" vector-effect="non-scaling-stroke"/>
+  </svg>`;
+}
+
+// memoryCard distinguishes two very different numbers that v0.6.3 conflated.
+//
+// balloon.current / balloon.maximum is what the *host* has handed the VM. With
+// an uninflated balloon those are equal, so every VM rendered as "100 %" —
+// the bug a user reported against v0.6.3. Actual consumption has to come from
+// inside the guest (balloon.available minus balloon.unused), and that is only
+// there when the guest runs a virtio-balloon driver and libvirt is collecting
+// its statistics. When it isn't, the card says "allocated" and shows no
+// percentage at all rather than inventing one.
+function memoryCard(m) {
+  if (m.mem_stats) {
+    // Two different true answers, so both are shown:
+    //   used  = available - unused  → pages not free, page cache included
+    //   avail = usable              → the guest's own MemAvailable, i.e. what
+    //                                 applications can still take without swapping
+    // They are deliberately not combined into a second "used" figure. Linux
+    // subtracts the low watermark from MemAvailable, so MemAvailable can sit
+    // *below* MemFree on an idle guest (measured on this host: 3.47 GiB usable
+    // vs 3.59 GiB unused of 3.63 GiB) — "available - usable" would then exceed
+    // "available - unused" and read like a contradiction.
+    const usedKiB = m.mem_avail_kib - m.mem_unused_kib;
+    const pct = m.mem_avail_kib ? (usedKiB / m.mem_avail_kib * 100) : null;
+    const parts = [`${fmtBytes(usedKiB * 1024)} used`];
+    if (m.mem_usable_kib) parts.push(`${fmtBytes(m.mem_usable_kib * 1024)} avail. to apps`);
+    parts.push(`${fmtBytes(m.mem_avail_kib * 1024)} total`);
+    return metricCard('Memory',
+      pct == null ? fmtBytes(usedKiB * 1024) : pct.toFixed(0) + ' %',
+      parts.join(' · '),
+      pushHistory('mem', pct), { max: 100 });
+  }
+  pushHistory('mem', null);
+  const sub = m.state === 'running'
+    ? 'in-guest usage unavailable — no balloon stats yet'
+    : 'in-guest usage needs a running VM';
+  return metricCard('Memory (allocated)', fmtBytes(m.mem_cur_kib * 1024), sub);
 }
 
 function renderMetrics(m) {
@@ -883,28 +1083,28 @@ function renderMetrics(m) {
   if (prev && dt > 0 && m.cpu_time_ns >= prev.cpu_time_ns) {
     cpu = ((m.cpu_time_ns - prev.cpu_time_ns) / (dt * 1e9)) / (m.vcpus || 1) * 100;
   }
-  const memPct = m.mem_max_kib ? (m.mem_cur_kib / m.mem_max_kib * 100) : null;
 
   const cards = [
     metricCard('State', escapeHtml(m.state), ''),
-    metricCard('CPU', cpu == null ? '…' : cpu.toFixed(1) + ' %', `${m.vcpus || '?'} vCPU`),
-    metricCard('Memory',
-      memPct == null ? fmtBytes(m.mem_cur_kib * 1024) : memPct.toFixed(0) + ' %',
-      `${fmtBytes(m.mem_cur_kib * 1024)} / ${fmtBytes(m.mem_max_kib * 1024)}`),
+    metricCard('CPU', cpu == null ? '…' : cpu.toFixed(1) + ' %', `${m.vcpus || '?'} vCPU`,
+      pushHistory('cpu', cpu)),
+    memoryCard(m),
   ];
   for (const n of (m.nets || [])) {
     const p = prev && prev.nets ? prev.nets.find(x => x.name === n.name) : null;
     const rx = metricRate(n.rx_bytes, p ? p.rx_bytes : null, dt);
     const tx = metricRate(n.tx_bytes, p ? p.tx_bytes : null, dt);
     cards.push(metricCard(`Net · ${escapeHtml(n.name)}`,
-      `&darr; ${fmtRate(rx)}`, `&uarr; ${fmtRate(tx)}`));
+      `&darr; ${fmtRate(rx)}`, `&uarr; ${fmtRate(tx)}`,
+      pushHistory('net:' + n.name, rx)));
   }
   for (const b of (m.blocks || [])) {
     const p = prev && prev.blocks ? prev.blocks.find(x => x.name === b.name) : null;
     const rd = metricRate(b.rd_bytes, p ? p.rd_bytes : null, dt);
     const wr = metricRate(b.wr_bytes, p ? p.wr_bytes : null, dt);
     cards.push(metricCard(`Disk · ${escapeHtml(b.name)}`,
-      `R ${fmtRate(rd)}`, `W ${fmtRate(wr)}`));
+      `R ${fmtRate(rd)}`, `W ${fmtRate(wr)}`,
+      pushHistory('blk:' + b.name, rd)));
   }
   body.innerHTML = `<div class="metric-grid">${cards.join('')}</div>`;
   metricsPrev = m;
@@ -991,7 +1191,24 @@ function stopBackupPoll() {
 
 async function renderBackupTab() {
   await loadVMs();
+  await loadBackupDest();
   await renderBackupJobs();
+}
+
+// The target directory is remembered on the appliance, not in this browser —
+// v0.6.3 reset the field to the default on every visit, so anyone backing up
+// to a remote mount had to retype the path each time. The daemon stores the
+// path that last started a job; an empty field still means "use the default".
+async function loadBackupDest() {
+  const input = $('#backup-dest');
+  if (!input) return;
+  try {
+    const s = await api('/settings');
+    if (s && s.backup_dir) {
+      input.value = s.backup_dir;
+      input.title = 'Last used target — edit to change it';
+    }
+  } catch (e) { /* a missing preference just leaves the placeholder */ }
 }
 
 async function renderBackupJobs() {
@@ -1175,9 +1392,23 @@ document.addEventListener('DOMContentLoaded', () => {
   $('#snap-vm-select').addEventListener('change', renderSnapshotsForCurrentVM);
   $('#usb-vm-select').addEventListener('change', renderUSBTab);
   $('#pci-vm-select').addEventListener('change', renderPCITab);
+  // A pure view preference, so it belongs in the browser rather than in the
+  // appliance's settings store.
+  const pciShowAll = $('#pci-show-all');
+  try { pciShowAll.checked = localStorage.getItem('zvmx.pci.showAll') === '1'; } catch (e) { /* private mode */ }
+  pciShowAll.addEventListener('change', () => {
+    try { localStorage.setItem('zvmx.pci.showAll', pciShowAll.checked ? '1' : '0'); } catch (e) { /* ignore */ }
+    renderPCITab();
+  });
   $('#vnc-vm-select').addEventListener('change', renderVNCForCurrentVM);
   $('#tpm-vm-select').addEventListener('change', renderTPMForCurrentVM);
-  $('#metrics-vm-select').addEventListener('change', () => { metricsPrev = null; pollMetrics(); });
+  // History belongs to one VM — carrying it across a switch would draw the
+  // previous VM's curve under the new one's numbers.
+  $('#metrics-vm-select').addEventListener('change', () => {
+    metricsPrev = null;
+    metricsHistory = {};
+    pollMetrics();
+  });
   $('#net-vm-select').addEventListener('change', renderNICsForCurrentVM);
   $('#snap-external').addEventListener('change', updateExtDirVisibility);
   $('#snap-storage-select').addEventListener('change', applyStorageSelection);
@@ -1193,7 +1424,15 @@ document.addEventListener('DOMContentLoaded', () => {
     const externalDir = $('#snap-extdir').value.trim();
     if (!vm) { setStatus('No VM selected', 'error'); return; }
     if (!name) { setStatus('Snapshot name missing', 'error'); return; }
-    if (/[\/\\.]/.test(name)) { setStatus('Snapshot name must not contain /, \\ or .', 'error'); return; }
+    // Mirrors validSnapshotName() on the server. Single spaces are fine —
+    // they were already accepted here in v0.6.3, and the resulting snapshots
+    // could then never be deleted. Doubled spaces are not: `virsh
+    // snapshot-list` splits its columns on exactly that.
+    if (!/^[A-Za-z0-9_.+][A-Za-z0-9_.+ -]*$/.test(name) || /\s{2}/.test(name) || name.includes('..')) {
+      setStatus('Snapshot name may contain letters, digits, single spaces and _ . - + '
+        + '— no leading -, no .., no double spaces', 'error');
+      return;
+    }
     if (external && externalDir && !externalDir.startsWith('/')) {
       setStatus('Target directory must be absolute (start with /)', 'error'); return;
     }

@@ -277,6 +277,11 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 }
 .vm-controls { display: flex; gap: 16px; align-items: center; }
 
+/* Power buttons sit left of the autostart controls in each VM row. */
+.vm-power { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
+.vm-power-none { color: var(--text-muted); font-size: 12px; padding: 0 8px; }
+.btn-sm { padding: 5px 12px; font-size: 12px; }
+
 /* ---------- Toggle ---------- */
 
 .switch { position: relative; width: 40px; height: 22px; flex: 0 0 40px; }
@@ -463,6 +468,35 @@ input:focus, select:focus {
   color: var(--text-muted); font-size: 12px;
   font-family: var(--font-mono);
 }
+
+/* A filter toggle sitting inline in a list heading, plus the line that says
+   what it is currently hiding. */
+.list-filter {
+  float: right; font-size: 12px; font-weight: 400;
+  color: var(--text-muted); text-transform: none; letter-spacing: normal;
+}
+.list-filter-note {
+  color: var(--text-muted); font-size: 12px;
+  margin: -4px 0 10px; clear: both;
+}
+.list-filter-note:empty { display: none; }
+
+/* Sparklines: in-page history for the metric above them. The stroke inherits
+   currentColor, so the accent is set on the container rather than the path. */
+.spark {
+  display: block; width: 100%; height: 24px; margin-top: 10px;
+  color: var(--accent); overflow: visible;
+}
+.spark-empty {
+  height: 24px; margin-top: 10px;
+  border-bottom: 1px dashed var(--card-border);
+}
+
+/* A form row whose inputs do not apply right now: still readable, clearly
+   inert. Used by the snapshot storage target when the VM is shut off. */
+.form-row.is-disabled select,
+.form-row.is-disabled input { opacity: .5; cursor: not-allowed; }
+.form-row.is-disabled label { color: var(--text-muted); }
 
 /* ---------- Misc ---------- */
 
