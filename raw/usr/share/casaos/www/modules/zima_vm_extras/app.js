@@ -743,6 +743,7 @@ async function renderVNCForCurrentVM() {
     const st = await api(`/vnc/${encodeURIComponent(vm)}`);
     body.innerHTML = '';
     body.appendChild(vncCard(vm, st));
+    if (st.present) body.appendChild(vncReachCard(vm, st));
   } catch (e) {
     body.innerHTML = `<div class="empty">Error: ${escapeHtml(e.message)}</div>`;
   }
@@ -883,6 +884,100 @@ function firmwareCard(st) {
       <div class="usb-meta">${st.loader ? 'loader: ' + escapeHtml(st.loader) : 'no UEFI loader'}</div>
     </div>
   `;
+  return card;
+}
+
+// A listen address that answers on every interface. ZVM writes '::', which is
+// the IPv6 any-address and accepts IPv4 too — the same reach as '0.0.0.0'.
+function vncListenIsExposed(addr) {
+  return addr === '' || addr === '::' || addr === '0.0.0.0' || addr === '*';
+}
+
+function vncListenLabel(addr) {
+  if (addr === '127.0.0.1' || addr === '::1') return 'local only';
+  if (vncListenIsExposed(addr)) return 'all interfaces';
+  return addr;
+}
+
+// Reachability is the other half of console security, and the half ZVM gets
+// wrong by default: a password stops someone using the console, the listen
+// address stops them reaching it at all. Restricting it to localhost turns the
+// console into something only a tunnel or a reverse proxy on the box can open.
+function vncReachCard(vm, st) {
+  const card = document.createElement('div');
+  card.className = 'usb-row card';
+
+  const exposed = vncListenIsExposed(st.listen);
+  let badge, desc;
+  if (st.listen_restart_required) {
+    // Same trap as the password: `virsh define` edits the persistent config,
+    // and the running qemu keeps the socket it was started with.
+    badge = '<span class="badge badge-warn">restart required</span>';
+    desc = `The VM config now says <b>${escapeHtml(vncListenLabel(st.listen))}</b>, but the console ` +
+      `running right now is still bound to <b>${escapeHtml(vncListenLabel(st.live_listen))}</b>` +
+      `${st.live_port ? ' on port ' + st.live_port : ''}. Restart the VM to apply it.`;
+  } else if (exposed) {
+    badge = '<span class="badge badge-warn">reachable from the LAN</span>';
+    desc = 'The console accepts connections on every interface. That is fine with a password ' +
+      'set, but restricting it to localhost means only this machine — an SSH tunnel or a ' +
+      'reverse proxy running on the ZimaOS box — can reach it at all.';
+  } else {
+    badge = '<span class="badge badge-current">local only</span>';
+    desc = 'The console only accepts connections from the ZimaOS box itself. Reach it through ' +
+      'an SSH tunnel (<code>ssh -L 5901:127.0.0.1:5901 …</code>) or a reverse proxy on the host.';
+  }
+
+  const portNow = st.autoport
+    ? `automatic${st.live_port ? ' — currently ' + st.live_port : ''}`
+    : (st.port || '—');
+
+  card.innerHTML = `
+    <div class="usb-info">
+      <div class="usb-id">Reachability ${badge}</div>
+      <div class="usb-desc">${desc}</div>
+      <div class="usb-meta">listen: ${escapeHtml(st.listen || '(default)')} · port: ${escapeHtml(String(portNow))}</div>
+    </div>
+    <div class="usb-actions">
+      <select class="vnc-listen" title="Which interfaces the console answers on">
+        <option value="127.0.0.1"${!exposed ? ' selected' : ''}>Local only (127.0.0.1)</option>
+        <option value="0.0.0.0"${exposed ? ' selected' : ''}>All interfaces (0.0.0.0)</option>
+      </select>
+      <input type="number" class="vnc-port" min="5900" max="65535" placeholder="auto"
+             value="${st.autoport ? '' : (st.port || '')}" title="Fixed port, or empty for automatic">
+      <button class="btn-primary" data-act="apply">Apply</button>
+    </div>
+  `;
+
+  card.querySelector('[data-act="apply"]').addEventListener('click', async () => {
+    const listen = card.querySelector('.vnc-listen').value;
+    const portRaw = card.querySelector('.vnc-port').value.trim();
+    const port = portRaw === '' ? 0 : parseInt(portRaw, 10);
+    if (portRaw !== '' && (!Number.isInteger(port) || port < 5900 || port > 65535)) {
+      setStatus('Port must be between 5900 and 65535, or empty for automatic', 'error');
+      return;
+    }
+    // Say why before the request fails: exposing an unprotected console is
+    // refused by the daemon, and "set a password first" is more use than the
+    // error that would come back.
+    if (listen === '0.0.0.0' && !st.protected && !st.pinned) {
+      setStatus('Set a VNC password first — VM Extras will not put an unprotected console on the LAN', 'error');
+      return;
+    }
+    if (listen === '0.0.0.0' && !exposed &&
+        !confirm(`Open "${vm}"'s console to every interface again?\n\n` +
+                 `It will be reachable from the whole LAN — with its password, but reachable.`)) return;
+    try {
+      const res = await api(`/vnc/${encodeURIComponent(vm)}`, {
+        method: 'POST',
+        body: JSON.stringify({ listen, port }),
+      });
+      setStatus(res.note ? `Reachability updated — ${res.note}` : 'Reachability updated', 'ok');
+      renderVNCForCurrentVM();
+    } catch (e) {
+      setStatus(`Failed: ${e.message}`, 'error');
+    }
+  });
+
   return card;
 }
 

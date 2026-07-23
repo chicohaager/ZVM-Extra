@@ -16,8 +16,9 @@ sysext with its own **VM Extras** tile on the ZimaOS dashboard.
 > external target directory did not follow the VM picker, so an external
 > snapshot of VM B could land in VM A's directory. Added: power controls on the
 > Autostart tab, remembered backup and snapshot target directories, a short
-> history sparkline per metric, and a PCIe list that hides the two thirds of a
-> host's devices that can never be passed through. Details in the sections
+> history sparkline per metric, a PCIe list that hides the two thirds of a
+> host's devices that can never be passed through, and a VNC console that can
+> be restricted to localhost instead of the whole LAN. Details in the sections
 > below.
 >
 > **v0.6.x adds the TPM & Secure Boot tab.** Windows 11 refuses to install
@@ -76,7 +77,7 @@ sysext with its own **VM Extras** tile on the ZimaOS dashboard.
 | **Snapshots** | Create / revert / delete per VM. Running VMs get a full external snapshot (disk **+ memory state**) so it is genuinely revertable; shut-off VMs get a quick internal snapshot. An optional **schedule** takes periodic snapshots with retention. |
 | **USB passthrough** | Pass a host USB device into a VM from the GUI — no manual XML. *Persistent* devices are re-applied automatically if the ZVM UI strips them on re-save, and across host reboots. |
 | **PCIe passthrough** | Pass a host PCI device through via VFIO. Shows IOMMU groups and the current host driver. Bridges and devices without an IOMMU group cannot be passed and are hidden behind a toggle, so the list shows candidates rather than the whole bus. Same persistence/reconcile as USB. |
-| **VNC security** | Shows each VM's console listen address and whether it is password-protected, and sets a console password. ZVM leaves consoles open to the whole LAN with no authentication; a reconciler re-applies the password whenever ZVM strips it. Distinguishes a saved password from an *effective* one — a console keeps running without it until the VM restarts, and the tab says so instead of showing green. |
+| **VNC security** | Shows each VM's console listen address and whether it is password-protected, sets a console password, and controls **reachability** — the listen address (all interfaces vs. localhost only) and the port. A console restricted to `127.0.0.1` can only be opened through an SSH tunnel or a reverse proxy on the box; libvirt applies the address to ZVM's websocket port too, so both surfaces close together. Putting a console back on all interfaces requires a password. ZVM leaves consoles open to the whole LAN with no authentication; a reconciler re-applies the password whenever ZVM strips it. Distinguishes a saved password from an *effective* one — a console keeps running without it until the VM restarts, and the tab says so instead of showing green. |
 | **TPM & Secure Boot** | Adds a TPM 2.0 emulator device so Windows 11 will install, and pins it against ZVM re-saves. Reports the saved device and the *running* one separately — a TPM added to a running VM only counts after a restart. Secure Boot status is shown but deliberately not switched: the firmware and its NVRAM file are a matched pair, and repointing an existing VM can leave it unbootable. |
 | **Metrics** | Live per-VM CPU, memory, disk and network, sampled from libvirt, each with a short in-page history sparkline. Memory is reported as *in-guest usage* where the guest's virtio-balloon driver provides it, and honestly labelled **allocated** where it does not — the balloon's target size equals the configured maximum on an uninflated balloon, which is why v0.6.3 showed every VM at 100 %. |
 | **Backup** | Export a VM — domain XML + disk image(s) — as a standalone compact qcow2, asynchronously. The target directory is remembered on the appliance between visits. |
@@ -108,7 +109,7 @@ with a short history per value.
 ![Metrics](images-for-github/metrics.png)
 
 **VNC security** — a console the way ZVM leaves it: reachable from the whole
-LAN, no password.
+LAN, no password. The second card restricts it to localhost.
 
 ![VNC security](images-for-github/vnc-security.png)
 
@@ -195,7 +196,7 @@ All endpoints are served under `/api` (reachable via the gateway at
 | POST   | `/api/pci/<vm>`                     | attach PCI device |
 | DELETE | `/api/pci/<vm>/<address>`           | detach PCI device |
 | GET    | `/api/vnc/<vm>`                     | console state: saved password, *live* password, listen address, pinned |
-| POST   | `/api/vnc/<vm>`                     | set the console password (1–8 chars) and pin it |
+| POST   | `/api/vnc/<vm>`                     | set the console password (1–8 chars), optionally `listen` (`127.0.0.1`\|`0.0.0.0`) and `port`, and pin them |
 | DELETE | `/api/vnc/<vm>`                     | remove the console password and the pin |
 | GET    | `/api/tpm/<vm>`                     | TPM state (saved + running) and firmware / Secure Boot info |
 | POST   | `/api/tpm/<vm>`                     | add a TPM 2.0 emulator device and pin it |

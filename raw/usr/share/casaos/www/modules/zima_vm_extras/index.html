@@ -7,7 +7,7 @@
   <meta name="robots" content="noindex">
   <meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
   <title>VM Extras</title>
-  <link rel="stylesheet" href="./styles.css?v=0.7.0-f565bb9a">
+  <link rel="stylesheet" href="./styles.css?v=0.7.0-e53f4636">
 </head>
 <body>
   <header>
@@ -186,7 +186,12 @@
         <br><small><b>Note:</b> the VNC protocol only uses the first 8&nbsp;characters. The
         password edits the VM config and takes effect on the <b>next VM start</b>; ZVM's own
         browser console will then prompt for it. VM Extras re-applies the password if the ZVM
-        UI strips it on a re-save, and keeps it across host reboots.</small>
+        UI strips it on a re-save, and keeps it across host reboots.
+        <br><b>Reachability</b> is the other half: a password stops someone <i>using</i> the
+        console, the listen address stops them <i>reaching</i> it. Restricting it to
+        <code>127.0.0.1</code> leaves it open only to an SSH tunnel or a reverse proxy running on
+        the ZimaOS box. Putting a console back on all interfaces requires a password to be set.
+        The address is pinned and re-applied like the password.</small>
       </p>
       <div class="vm-picker-row">
         <label for="vnc-vm-select">VM:</label>
@@ -280,6 +285,6 @@
     <span id="status"></span>
   </footer>
 
-  <script src="./app.js?v=0.7.0-06a23d29"></script>
+  <script src="./app.js?v=0.7.0-eaf42215"></script>
 </body>
 </html>

@@ -15,10 +15,17 @@ import (
 	"time"
 )
 
-// Entry is the VNC console password VM Extras keeps applied to one VM.
+// Entry is the VNC console state VM Extras keeps applied to one VM.
+//
+// Listen and Port are optional: an entry written before v0.7.0 has neither,
+// and an operator who only set a password never gets them. An empty Listen
+// means "leave the address alone", which is what keeps old pins working
+// unchanged after an upgrade.
 type Entry struct {
 	VM       string `json:"vm"`
 	Password string `json:"password"`
+	Listen   string `json:"listen,omitempty"` // "127.0.0.1" | "0.0.0.0"
+	Port     int    `json:"port,omitempty"`   // 0 = autoport
 }
 
 // Store persists per-VM VNC passwords in a JSON file. Because the file holds
@@ -120,6 +127,8 @@ type Controller interface {
 	State(name string) (string, error)
 	VNCHasPassword(name string) (bool, error)
 	SetVNCPassword(name, pw string) error
+	VNCListenInfo(name string) (listen string, port int, autoport bool, err error)
+	SetVNCListen(name, listen string, port int) error
 }
 
 // Reconcile re-applies the stored VNC password to every VM whose persistent
@@ -132,24 +141,64 @@ func (s *Store) Reconcile(vc Controller, logf func(string, ...any)) {
 		if _, err := vc.State(e.VM); err != nil {
 			continue
 		}
-		has, err := vc.VNCHasPassword(e.VM)
+		// An entry may pin only the listen address — restricting a console to
+		// localhost is protective on its own and does not require a password.
+		// Such an entry must skip the password repair entirely: setting an
+		// empty password leaves the config without one, so the next pass would
+		// see it "missing" and repair it again, once a minute, forever.
+		has := true
+		if e.Password != "" {
+			var err error
+			has, err = vc.VNCHasPassword(e.VM)
+			if err != nil {
+				if logf != nil {
+					logf("vnc reconcile %s: %v", e.VM, err)
+				}
+				continue
+			}
+		}
+		if !has {
+			if err := vc.SetVNCPassword(e.VM, e.Password); err != nil {
+				if logf != nil {
+					logf("vnc reconcile: repair %s failed: %v", e.VM, err)
+				}
+				continue
+			}
+			if logf != nil {
+				logf("vnc reconcile: restored VNC password on %s config", e.VM)
+			}
+		}
+
+		// The listen address is pinned the same way, and for the same reason:
+		// ZVM re-generates <graphics> with listen='::' on every re-save, which
+		// would silently put a console the operator restricted to localhost
+		// back on the LAN. Only entries that asked for an address are checked,
+		// so a password-only pin behaves exactly as before.
+		if e.Listen == "" {
+			continue
+		}
+		listen, port, autoport, err := vc.VNCListenInfo(e.VM)
 		if err != nil {
 			if logf != nil {
-				logf("vnc reconcile %s: %v", e.VM, err)
+				logf("vnc reconcile %s listen: %v", e.VM, err)
 			}
 			continue
 		}
-		if has {
+		// Compare against what was asked for. An autoport domain has no fixed
+		// port to compare, so the port only counts when one was pinned.
+		portDrifted := (e.Port > 0 && (autoport || port != e.Port)) ||
+			(e.Port <= 0 && !autoport)
+		if listen == e.Listen && !portDrifted {
 			continue
 		}
-		if err := vc.SetVNCPassword(e.VM, e.Password); err != nil {
+		if err := vc.SetVNCListen(e.VM, e.Listen, e.Port); err != nil {
 			if logf != nil {
-				logf("vnc reconcile: repair %s failed: %v", e.VM, err)
+				logf("vnc reconcile: repair %s listen failed: %v", e.VM, err)
 			}
 			continue
 		}
 		if logf != nil {
-			logf("vnc reconcile: restored VNC password on %s config", e.VM)
+			logf("vnc reconcile: restored VNC listen %s on %s config", e.Listen, e.VM)
 		}
 	}
 }

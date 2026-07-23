@@ -1378,11 +1378,20 @@ func (s *Server) vncDomain(w http.ResponseWriter, r *http.Request) {
 		// live console separately — otherwise the UI shows "protected" over a
 		// console that anyone on the LAN can still open right now.
 		running, liveHasPw, liveErr := s.Virsh.VNCLiveInfo(vm)
+		_, port, autoport, _ := s.Virsh.VNCListenInfo(vm)
 		resp := map[string]any{
 			"vm": vm, "present": present, "protected": hasPw,
 			"listen": listen, "pinned": pinned,
+			"port": port, "autoport": autoport,
 			"running": running, "live_protected": liveHasPw,
 			"restart_required": running && hasPw && !liveHasPw,
+		}
+		// The address the running qemu is bound to, which is not necessarily
+		// the configured one — same reason the password is reported twice.
+		if _, liveListen, livePort, err := s.Virsh.VNCLiveListen(vm); err == nil && running {
+			resp["live_listen"] = liveListen
+			resp["live_port"] = livePort
+			resp["listen_restart_required"] = liveListen != "" && liveListen != listen
 		}
 		if liveErr != nil {
 			// Never silently claim the live console is fine when we failed to
@@ -1396,25 +1405,88 @@ func (s *Server) vncDomain(w http.ResponseWriter, r *http.Request) {
 	case "POST":
 		var in struct {
 			Password string `json:"password"`
+			Listen   string `json:"listen"` // optional: "127.0.0.1" | "0.0.0.0"
+			Port     int    `json:"port"`   // optional: 0 = autoport
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			writeErr(w, 400, err.Error())
 			return
 		}
+		// Changing only the listen address should not require retyping a
+		// password the operator may not remember — reuse the pinned one. This
+		// is also what keeps the exposure guard honest: every path through
+		// here ends with a password on the console, so "0.0.0.0" can never be
+		// selected for an unprotected one.
+		if in.Password == "" {
+			if pinnedEntry, ok := s.VNC.Get(vm); ok && pinnedEntry.Password != "" {
+				in.Password = pinnedEntry.Password
+			}
+		}
+		// Two addresses only. A free-form field here is a foot-gun: a typo
+		// binds the console to an address that does not exist on the host and
+		// the VM then fails to start, which is a worse outcome than not
+		// offering the choice.
+		if in.Listen != "" && in.Listen != "127.0.0.1" && in.Listen != "0.0.0.0" {
+			writeErr(w, 400, "listen must be 127.0.0.1 (local only) or 0.0.0.0 (all interfaces)")
+			return
+		}
+		if in.Port != 0 && (in.Port < 5900 || in.Port > 65535) {
+			writeErr(w, 400, "port must be 0 (automatic) or between 5900 and 65535")
+			return
+		}
+
+		// Restricting a console to localhost is protective in itself, so it is
+		// allowed with no password at all. Putting one on 0.0.0.0 is not:
+		// that is precisely the ZVM default this tab exists to close, and
+		// ValidPassword below refuses an empty password, so every exposing
+		// path ends with authentication on the console.
+		if in.Password == "" && in.Listen == "127.0.0.1" {
+			if err := s.Virsh.SetVNCListen(vm, in.Listen, in.Port); err != nil {
+				writeErr(w, 500, err.Error())
+				return
+			}
+			entry := vnc.Entry{VM: vm, Listen: in.Listen, Port: in.Port}
+			if prev, ok := s.VNC.Get(vm); ok {
+				entry.Password = prev.Password // keep any pinned password
+			}
+			if err := s.VNC.Set(entry); err != nil {
+				writeErr(w, 500, "listen set, but pinning failed: "+err.Error())
+				return
+			}
+			writeJSON(w, 200, map[string]any{
+				"listen": in.Listen, "port": in.Port,
+				"note": "takes effect on next VM start",
+			})
+			return
+		}
+
 		if !vnc.ValidPassword(in.Password) {
-			writeErr(w, 400, "password must be 1–8 characters, printable ASCII, without quotes or <>&")
+			msg := "password must be 1–8 characters, printable ASCII, without quotes or <>&"
+			if in.Listen == "0.0.0.0" {
+				msg = "a console on all interfaces needs a password — set one, or choose 127.0.0.1 (local only)"
+			}
+			writeErr(w, 400, msg)
 			return
 		}
 		if err := s.Virsh.SetVNCPassword(vm, in.Password); err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}
+		if in.Listen != "" {
+			if err := s.Virsh.SetVNCListen(vm, in.Listen, in.Port); err != nil {
+				writeErr(w, 500, "password set, but listen address failed: "+err.Error())
+				return
+			}
+		}
 		// Pin it so the reconciler keeps it applied across ZVM re-saves.
-		if err := s.VNC.Set(vnc.Entry{VM: vm, Password: in.Password}); err != nil {
+		if err := s.VNC.Set(vnc.Entry{VM: vm, Password: in.Password, Listen: in.Listen, Port: in.Port}); err != nil {
 			writeErr(w, 500, "password set, but pinning failed: "+err.Error())
 			return
 		}
-		writeJSON(w, 200, map[string]any{"protected": true, "note": "takes effect on next VM start"})
+		writeJSON(w, 200, map[string]any{
+			"protected": true, "listen": in.Listen, "port": in.Port,
+			"note": "takes effect on next VM start",
+		})
 
 	case "DELETE":
 		// Unpin first so the reconciler will not immediately re-apply it.

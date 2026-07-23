@@ -61,6 +61,11 @@ type fakeController struct {
 	state    map[string]string
 	hasPw    map[string]bool
 	setCalls []string
+
+	listen         map[string]string
+	port           map[string]int
+	autoport       map[string]bool
+	setListenCalls []string
 }
 
 func (f *fakeController) State(n string) (string, error) {
@@ -76,6 +81,41 @@ func (f *fakeController) VNCHasPassword(n string) (bool, error) { return f.hasPw
 func (f *fakeController) SetVNCPassword(n, pw string) error {
 	f.setCalls = append(f.setCalls, n)
 	f.hasPw[n] = pw != ""
+	return nil
+}
+
+func (f *fakeController) VNCListenInfo(n string) (string, int, bool, error) {
+	auto := true
+	if f.autoport != nil {
+		if a, ok := f.autoport[n]; ok {
+			auto = a
+		}
+	}
+	var p int
+	if f.port != nil {
+		p = f.port[n]
+	}
+	var l string
+	if f.listen != nil {
+		l = f.listen[n]
+	}
+	return l, p, auto, nil
+}
+
+func (f *fakeController) SetVNCListen(n, listen string, port int) error {
+	f.setListenCalls = append(f.setListenCalls, n)
+	if f.listen == nil {
+		f.listen = map[string]string{}
+	}
+	if f.port == nil {
+		f.port = map[string]int{}
+	}
+	if f.autoport == nil {
+		f.autoport = map[string]bool{}
+	}
+	f.listen[n] = listen
+	f.port[n] = port
+	f.autoport[n] = port <= 0
 	return nil
 }
 
@@ -106,5 +146,41 @@ func TestReconcileRepairsMissingPassword(t *testing.T) {
 	s.Reconcile(fc, nil)
 	if len(fc.setCalls) != 1 {
 		t.Fatalf("second pass made extra repairs: %v", fc.setCalls)
+	}
+}
+
+// A pinned listen address must survive ZVM re-generating <graphics> with
+// listen='::', and an entry that never asked for an address must be left
+// alone — that is every pin written before v0.7.0.
+func TestReconcileRepairsListenOnlyWhenPinned(t *testing.T) {
+	s, err := NewStore(filepath.Join(t.TempDir(), "vnc.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set(Entry{VM: "restricted", Password: "pw", Listen: "127.0.0.1"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Set(Entry{VM: "pwonly", Password: "pw"}); err != nil {
+		t.Fatal(err)
+	}
+	fc := &fakeController{
+		state:    map[string]string{"restricted": "running", "pwonly": "running"},
+		hasPw:    map[string]bool{"restricted": true, "pwonly": true},
+		listen:   map[string]string{"restricted": "::", "pwonly": "::"},
+		autoport: map[string]bool{"restricted": true, "pwonly": true},
+	}
+	s.Reconcile(fc, nil)
+
+	if len(fc.setListenCalls) != 1 || fc.setListenCalls[0] != "restricted" {
+		t.Fatalf("setListenCalls = %v, want [restricted]", fc.setListenCalls)
+	}
+	if fc.listen["pwonly"] != "::" {
+		t.Fatalf("password-only entry had its listen address changed to %q", fc.listen["pwonly"])
+	}
+
+	// Idempotent: the address now matches, so a second pass repairs nothing.
+	s.Reconcile(fc, nil)
+	if len(fc.setListenCalls) != 1 {
+		t.Fatalf("second pass repaired again: %v", fc.setListenCalls)
 	}
 }

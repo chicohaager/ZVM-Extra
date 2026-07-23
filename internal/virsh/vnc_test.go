@@ -247,3 +247,92 @@ func TestSetVNCPasswordRequestsSecurityInfo(t *testing.T) {
 		}
 	}
 }
+
+// The listen address lives in two places and libvirt honours the child
+// element, so rewriting only the attribute would pass a naive check and
+// change nothing on the actual console.
+func TestSetGraphicsListenXML(t *testing.T) {
+	const withChild = `<domain><devices>` +
+		`<graphics type='vnc' port='-1' autoport='yes' listen='::'>` +
+		`<listen type='address' address='::'/>` +
+		`</graphics></devices></domain>`
+
+	out, err := setGraphicsListenXML(withChild, "127.0.0.1", 5905)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out, `<listen type='address' address='127.0.0.1'/>`) {
+		t.Errorf("child <listen> not rewritten:\n%s", out)
+	}
+	if !strings.Contains(out, `listen='127.0.0.1'`) {
+		t.Errorf("listen attribute not rewritten:\n%s", out)
+	}
+	if !strings.Contains(out, `port='5905'`) || !strings.Contains(out, `autoport='no'`) {
+		t.Errorf("fixed port not applied:\n%s", out)
+	}
+	if strings.Contains(out, `address='::'`) {
+		t.Errorf("old address survived:\n%s", out)
+	}
+	// And it must read back as what we wrote — this is what makes the
+	// reconciler idempotent instead of rewriting the domain every minute.
+	if _, _, listen := vncGraphicsInfo(out); listen != "127.0.0.1" {
+		t.Errorf("read back listen = %q, want 127.0.0.1", listen)
+	}
+	if p, auto := vncGraphicsPort(out); p != 5905 || auto {
+		t.Errorf("read back port = %d, autoport = %v, want 5905, false", p, auto)
+	}
+
+	// Self-closing tag with no child element: attribute only, and autoport
+	// when no port is given.
+	const selfClosing = `<domain><devices>` +
+		`<graphics type='vnc' port='-1' autoport='yes' listen='::'/>` +
+		`</devices></domain>`
+	out2, err := setGraphicsListenXML(selfClosing, "0.0.0.0", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(out2, `listen='0.0.0.0'`) || !strings.Contains(out2, `autoport='yes'`) {
+		t.Errorf("self-closing tag not rewritten:\n%s", out2)
+	}
+	// " port='" with the leading space, so this does not match "autoport='".
+	if strings.Contains(out2, " port='") {
+		t.Errorf("autoport must not pin a port:\n%s", out2)
+	}
+
+	// A listen child of another type must not be left behind overriding us.
+	const netChild = `<domain><devices>` +
+		`<graphics type='vnc' listen='::'>` +
+		`<listen type='network' network='default'/>` +
+		`</graphics></devices></domain>`
+	out3, err := setGraphicsListenXML(netChild, "127.0.0.1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(out3, "type='network'") {
+		t.Errorf("network listen child survived:\n%s", out3)
+	}
+
+	if _, err := setGraphicsListenXML(`<domain><devices/></domain>`, "127.0.0.1", 0); err == nil {
+		t.Error("expected an error for a domain with no VNC graphics device")
+	}
+}
+
+// The password edit must not disturb the listen address, and vice versa.
+func TestPasswordAndListenAreIndependent(t *testing.T) {
+	const dom = `<domain><devices>` +
+		`<graphics type='vnc' port='-1' autoport='yes' listen='::'>` +
+		`<listen type='address' address='::'/>` +
+		`</graphics></devices></domain>`
+	withListen, err := setGraphicsListenXML(dom, "127.0.0.1", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	withBoth, err := setGraphicsPasswordXML(withListen, "s3cret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	found, hasPw, listen := vncGraphicsInfo(withBoth)
+	if !found || !hasPw || listen != "127.0.0.1" {
+		t.Fatalf("found=%v hasPw=%v listen=%q, want true true 127.0.0.1\n%s", found, hasPw, listen, withBoth)
+	}
+}

@@ -23,6 +23,7 @@ package virsh
 
 import (
 	"fmt"
+	"strconv"
 	"strings"
 )
 
@@ -89,12 +90,107 @@ func tagDropAttr(tag, attr string) string {
 
 // vncGraphicsInfo reports whether domain XML has a VNC graphics device,
 // whether that device sets a password, and its listen address.
+//
+// The listen address is read from the <listen> child element when there is
+// one and from the `listen` attribute otherwise: libvirt writes both, and the
+// child element is what it honours if the two ever disagree.
 func vncGraphicsInfo(domXML string) (found, hasPassword bool, listen string) {
-	tag, _, _, ok := vncOpenTag(domXML)
+	tag, _, end, ok := vncOpenTag(domXML)
 	if !ok {
 		return false, false, ""
 	}
-	return true, tagAttr(tag, "passwd") != "", tagAttr(tag, "listen")
+	listen = tagAttr(tag, "listen")
+	if child := vncListenChild(domXML, tag, end); child != "" {
+		if addr := tagAttr(child, "address"); addr != "" {
+			listen = addr
+		}
+	}
+	return true, tagAttr(tag, "passwd") != "", listen
+}
+
+// vncGraphicsPort reports the console's TCP port and whether libvirt picks it
+// automatically. An autoport domain has no fixed port until it starts, so the
+// persistent config reports port -1 or none at all.
+func vncGraphicsPort(domXML string) (port int, autoport bool) {
+	tag, _, _, ok := vncOpenTag(domXML)
+	if !ok {
+		return 0, false
+	}
+	autoport = tagAttr(tag, "autoport") != "no"
+	if p, err := strconv.Atoi(tagAttr(tag, "port")); err == nil && p > 0 {
+		port = p
+	}
+	return port, autoport
+}
+
+// vncListenChild returns the <listen …> child element of the graphics element
+// whose opening tag is `tag` (ending at offset `end`), or "" if there is none.
+func vncListenChild(domXML, tag string, end int) string {
+	if strings.HasSuffix(strings.TrimSpace(tag), "/>") {
+		return "" // self-closing: no children
+	}
+	closeIdx := strings.Index(domXML[end:], "</graphics>")
+	if closeIdx < 0 {
+		return ""
+	}
+	body := domXML[end : end+closeIdx]
+	i := strings.Index(body, "<listen")
+	if i < 0 {
+		return ""
+	}
+	j := strings.IndexByte(body[i:], '>')
+	if j < 0 {
+		return ""
+	}
+	return body[i : i+j+1]
+}
+
+// setGraphicsListenXML sets the VNC console's listen address and port.
+//
+// The address is written in both places libvirt keeps it — the `listen`
+// attribute on <graphics> and the <listen type='address'/> child element —
+// because which of them a domain carries depends on who defined it, and the
+// child element is the one libvirt honours. Rewriting only the attribute
+// would look like it worked and change nothing.
+//
+// port <= 0 means autoport: libvirt assigns a free display on each start.
+func setGraphicsListenXML(domXML, listen string, port int) (string, error) {
+	tag, start, end, ok := vncOpenTag(domXML)
+	if !ok {
+		return "", fmt.Errorf("domain has no VNC graphics device")
+	}
+
+	newTag := tagDropAttr(tag, "listen")
+	newTag = tagDropAttr(newTag, "port")
+	newTag = tagDropAttr(newTag, "autoport")
+	attrs := " listen='" + listen + "'"
+	if port > 0 {
+		attrs += " port='" + strconv.Itoa(port) + "' autoport='no'"
+	} else {
+		attrs += " autoport='yes'"
+	}
+	const head = "<graphics"
+	newTag = head + attrs + newTag[len(head):]
+	out := domXML[:start] + newTag + domXML[end:]
+
+	// Re-locate the element in the rewritten document and replace its
+	// <listen> child wholesale — a child of type='network' or type='socket'
+	// would otherwise survive and keep overriding the address we just set.
+	tag2, _, end2, ok := vncOpenTag(out)
+	if !ok {
+		return out, nil
+	}
+	child := vncListenChild(out, tag2, end2)
+	if child == "" {
+		return out, nil // attribute only; libvirt regenerates the child on define
+	}
+	idx := strings.Index(out[end2:], child)
+	if idx < 0 {
+		return out, nil
+	}
+	abs := end2 + idx
+	replacement := "<listen type='address' address='" + listen + "'/>"
+	return out[:abs] + replacement + out[abs+len(child):], nil
 }
 
 // setGraphicsPasswordXML returns domXML with the VNC graphics device's passwd
@@ -168,6 +264,68 @@ func (c *Client) VNCLiveInfo(domain string) (running, hasPassword bool, err erro
 		return true, true, nil
 	}
 	return true, hasPw, nil
+}
+
+// VNCListenInfo reports the console's listen address and port from the
+// domain's persistent config, plus whether libvirt picks the port itself.
+func (c *Client) VNCListenInfo(domain string) (listen string, port int, autoport bool, err error) {
+	out, err := c.run("dumpxml", "--inactive", "--security-info", domain)
+	if err != nil {
+		return "", 0, false, err
+	}
+	present, _, listen := vncGraphicsInfo(out)
+	if !present {
+		return "", 0, false, nil
+	}
+	port, autoport = vncGraphicsPort(out)
+	return listen, port, autoport, nil
+}
+
+// VNCLiveListen reports the listen address the *running* qemu is actually
+// bound to. As with the password, the persistent config is a statement of
+// intent: a domain edited after boot still serves the old address until it
+// restarts, and saying otherwise would put a "local only" label on a console
+// that is still on the LAN.
+func (c *Client) VNCLiveListen(domain string) (running bool, listen string, port int, err error) {
+	state, err := c.State(domain)
+	if err != nil {
+		return false, "", 0, err
+	}
+	if state != "running" {
+		return false, "", 0, nil
+	}
+	out, err := c.run("dumpxml", "--security-info", domain)
+	if err != nil {
+		return false, "", 0, err
+	}
+	present, _, listen := vncGraphicsInfo(out)
+	if !present {
+		return true, "", 0, nil
+	}
+	port, _ = vncGraphicsPort(out)
+	return true, listen, port, nil
+}
+
+// SetVNCListen writes the console's listen address and port to the persistent
+// domain config. port <= 0 selects autoport. Like SetVNCPassword this uses
+// `virsh define`, so a running VM is untouched and the change lands on its
+// next start.
+func (c *Client) SetVNCListen(domain, listen string, port int) error {
+	out, err := c.run("dumpxml", "--inactive", "--security-info", domain)
+	if err != nil {
+		return err
+	}
+	modified, err := setGraphicsListenXML(out, listen, port)
+	if err != nil {
+		return err
+	}
+	tmp, err := writeTempXML(modified)
+	if err != nil {
+		return err
+	}
+	defer removeTemp(tmp)
+	_, err = c.run("define", tmp)
+	return err
 }
 
 // SetVNCPassword sets (pw != "") or clears (pw == "") the VNC console password

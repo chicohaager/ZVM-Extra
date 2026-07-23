@@ -337,6 +337,8 @@ input:focus, select:focus {
   box-shadow: 0 0 0 3px var(--accent-ring);
 }
 .vnc-pw { width: 160px; font-family: var(--font-mono); }
+.vnc-listen { width: 200px; }
+.vnc-port { width: 96px; font-family: var(--font-mono); }
 
 .checkbox {
   display: inline-flex; align-items: center; gap: 6px;
