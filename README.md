@@ -5,8 +5,21 @@ It adds the day-to-day operational features the official UI lacks, without
 touching the ZVM frontend — it installs as a separate `zima_vm_extras.raw`
 sysext with its own **VM Extras** tile on the ZimaOS dashboard.
 
-> Status: **v0.6.3** — verified on ZimaOS **1.7.0-beta1** (kernel 6.18.9,
+> Status: **v0.7.0** — verified on ZimaOS **1.7.0-beta1** (kernel 6.18.9,
 > virtqemud / libvirt 10, qemu 9).
+>
+> **v0.7.0 is a bug-fix and quality-of-life release** from community feedback
+> on v0.6.3. Fixed: snapshots whose name contains a space could be created and
+> then neither deleted nor reverted; the Metrics tab reported every VM at 100 %
+> memory, because it divided the balloon's target size by itself; the snapshot
+> storage target vanished for a shut-off VM instead of saying why; and the
+> external target directory did not follow the VM picker, so an external
+> snapshot of VM B could land in VM A's directory. Added: power controls on the
+> Autostart tab, remembered backup and snapshot target directories, a short
+> history sparkline per metric, a PCIe list that hides the two thirds of a
+> host's devices that can never be passed through, and a VNC console that can
+> be restricted to localhost instead of the whole LAN. Details in the sections
+> below.
 >
 > **v0.6.x adds the TPM & Secure Boot tab.** Windows 11 refuses to install
 > without a TPM 2.0. ZVM has a Windows-11-specific code path for this — its
@@ -60,20 +73,20 @@ sysext with its own **VM Extras** tile on the ZimaOS dashboard.
 
 | Tab | What it does |
 |-----|--------------|
-| **Autostart** | Starts VMs on host boot, orchestrated by the daemon — per-VM **order** and **delay** so VMs come up in sequence. An optional per-VM **watchdog** restarts a VM if it stops or crashes. |
+| **Autostart** | Starts VMs on host boot, orchestrated by the daemon — per-VM **order** and **delay** so VMs come up in sequence. An optional per-VM **watchdog** restarts a VM if it stops or crashes. Also carries the **power controls**: start, ACPI shut down, reboot, resume, and a confirmed force-off. |
 | **Snapshots** | Create / revert / delete per VM. Running VMs get a full external snapshot (disk **+ memory state**) so it is genuinely revertable; shut-off VMs get a quick internal snapshot. An optional **schedule** takes periodic snapshots with retention. |
 | **USB passthrough** | Pass a host USB device into a VM from the GUI — no manual XML. *Persistent* devices are re-applied automatically if the ZVM UI strips them on re-save, and across host reboots. |
-| **PCIe passthrough** | Pass a host PCI device through via VFIO. Shows IOMMU groups and the current host driver; bridges are blocked. Same persistence/reconcile as USB. |
-| **VNC security** | Shows each VM's console listen address and whether it is password-protected, and sets a console password. ZVM leaves consoles open to the whole LAN with no authentication; a reconciler re-applies the password whenever ZVM strips it. Distinguishes a saved password from an *effective* one — a console keeps running without it until the VM restarts, and the tab says so instead of showing green. |
+| **PCIe passthrough** | Pass a host PCI device through via VFIO. Shows IOMMU groups and the current host driver. Bridges and devices without an IOMMU group cannot be passed and are hidden behind a toggle, so the list shows candidates rather than the whole bus. Same persistence/reconcile as USB. |
+| **VNC security** | Shows each VM's console listen address and whether it is password-protected, sets a console password, and controls **reachability** — the listen address (all interfaces vs. localhost only) and the port. A console restricted to `127.0.0.1` can only be opened through an SSH tunnel or a reverse proxy on the box; libvirt applies the address to ZVM's websocket port too, so both surfaces close together. Putting a console back on all interfaces requires a password. ZVM leaves consoles open to the whole LAN with no authentication; a reconciler re-applies the password whenever ZVM strips it. Distinguishes a saved password from an *effective* one — a console keeps running without it until the VM restarts, and the tab says so instead of showing green. |
 | **TPM & Secure Boot** | Adds a TPM 2.0 emulator device so Windows 11 will install, and pins it against ZVM re-saves. Reports the saved device and the *running* one separately — a TPM added to a running VM only counts after a restart. Secure Boot status is shown but deliberately not switched: the firmware and its NVRAM file are a matched pair, and repointing an existing VM can leave it unbootable. |
-| **Metrics** | Live per-VM CPU, memory, disk and network, sampled from libvirt. |
-| **Backup** | Export a VM — domain XML + disk image(s) — as a standalone compact qcow2, asynchronously. |
+| **Metrics** | Live per-VM CPU, memory, disk and network, sampled from libvirt, each with a short in-page history sparkline. Memory is reported as *in-guest usage* where the guest's virtio-balloon driver provides it, and honestly labelled **allocated** where it does not — the balloon's target size equals the configured maximum on an uninflated balloon, which is why v0.6.3 showed every VM at 100 %. |
+| **Backup** | Export a VM — domain XML + disk image(s) — as a standalone compact qcow2, asynchronously. The target directory is remembered on the appliance between visits. |
 | **Network** | Switch a VM's NIC to another libvirt network and change its model — config-only, never touches host bridges. |
 | **Remote storage** | Mount NFS / SMB-CIFS shares; mounted paths appear as snapshot/backup storage targets. |
 
 ## Screenshots
 
-**Dashboard — VM overview & autostart**
+**Dashboard — VM overview, power control & autostart**
 
 ![Dashboard](images-for-github/dashboard.png)
 
@@ -85,8 +98,18 @@ sysext with its own **VM Extras** tile on the ZimaOS dashboard.
 
 ![USB passthrough](images-for-github/usb-passthrough.png)
 
+**PCIe passthrough** — bridges and devices without an IOMMU group are hidden by
+default; on this ZimaCube that is 24 of 41 entries. One checkbox brings them back.
+
+![PCIe passthrough](images-for-github/pcie-passthrough.png)
+
+**Metrics** — memory is the guest's own figure, not the balloon's target size,
+with a short history per value.
+
+![Metrics](images-for-github/metrics.png)
+
 **VNC security** — a console the way ZVM leaves it: reachable from the whole
-LAN, no password.
+LAN, no password. The second card restricts it to localhost.
 
 ![VNC security](images-for-github/vnc-security.png)
 
@@ -143,7 +166,7 @@ a static UI under `/usr/share/casaos/www/modules/`, and a systemd service.
   header-coupled cgo).
 - **State** — `/DATA/AppData/zima-vm-extras/`, survives reboots and OS
   upgrades: `autostart.json`, `usb.json`, `pci.json`, `vnc.json`, `tpm.json`,
-  `schedule.json`, `mounts.json`, `snapshots/`.
+  `schedule.json`, `mounts.json`, `settings.json`, `snapshots/`.
 - **Reconcilers** — four background loops, each on a 60-second tick, keep the
   pinned USB and PCI passthroughs, the VNC console password and the TPM device
   present in each VM's persistent config, because the ZVM UI drops them on a
@@ -173,7 +196,7 @@ All endpoints are served under `/api` (reachable via the gateway at
 | POST   | `/api/pci/<vm>`                     | attach PCI device |
 | DELETE | `/api/pci/<vm>/<address>`           | detach PCI device |
 | GET    | `/api/vnc/<vm>`                     | console state: saved password, *live* password, listen address, pinned |
-| POST   | `/api/vnc/<vm>`                     | set the console password (1–8 chars) and pin it |
+| POST   | `/api/vnc/<vm>`                     | set the console password (1–8 chars), optionally `listen` (`127.0.0.1`\|`0.0.0.0`) and `port`, and pin them |
 | DELETE | `/api/vnc/<vm>`                     | remove the console password and the pin |
 | GET    | `/api/tpm/<vm>`                     | TPM state (saved + running) and firmware / Secure Boot info |
 | POST   | `/api/tpm/<vm>`                     | add a TPM 2.0 emulator device and pin it |
@@ -184,6 +207,8 @@ All endpoints are served under `/api` (reachable via the gateway at
 | POST   | `/api/mounts/<id>/mount`            | mount |
 | POST   | `/api/mounts/<id>/unmount`          | unmount |
 | GET    | `/api/metrics/<vm>`                 | live VM stats sample (CPU, mem, disk, net) |
+| POST   | `/api/power/<vm>`                   | `start`, `shutdown`, `reboot`, `force-off`, `suspend`, `resume` |
+| GET/PUT | `/api/settings`                    | remembered backup / snapshot target directories |
 | GET    | `/api/schedule`                     | list snapshot schedules |
 | GET/PUT/DELETE | `/api/schedule/<vm>`        | per-VM snapshot schedule |
 | GET    | `/api/backup`                       | list backup jobs |

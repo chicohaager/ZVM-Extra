@@ -101,9 +101,51 @@ func (c *Client) Start(name string) error {
 	return err
 }
 
-// Shutdown sends an ACPI shutdown to the domain.
+// Shutdown sends an ACPI shutdown to the domain. The guest decides when (and
+// whether) to act on it — a guest without ACPI support simply ignores it.
 func (c *Client) Shutdown(name string) error {
 	_, err := c.run("shutdown", name)
+	return err
+}
+
+// Reboot sends an ACPI reboot request. Same caveat as Shutdown.
+func (c *Client) Reboot(name string) error {
+	_, err := c.run("reboot", name)
+	return err
+}
+
+// Destroy cuts the domain's power immediately. This is the equivalent of
+// pulling the plug: the guest gets no chance to flush its filesystems.
+func (c *Client) Destroy(name string) error {
+	_, err := c.run("destroy", name)
+	return err
+}
+
+// Suspend freezes a running domain in RAM.
+func (c *Client) Suspend(name string) error {
+	_, err := c.run("suspend", name)
+	return err
+}
+
+// Resume unfreezes a suspended domain.
+func (c *Client) Resume(name string) error {
+	_, err := c.run("resume", name)
+	return err
+}
+
+// SetMemStatsPeriod enables periodic collection of the guest's virtio-balloon
+// memory statistics, in seconds (0 disables).
+//
+// Without this, `domstats` reports only balloon.current and balloon.maximum —
+// and balloon.current is the balloon's *target* size, which equals the
+// configured maximum whenever the balloon is not inflated. Reading that pair
+// as "used / total" makes every VM look like it is at 100 % memory, which is
+// exactly what v0.6.3 displayed. The in-guest figures (balloon.available,
+// balloon.unused) only appear once a collection period is set.
+//
+// --live only: nothing is written to the persistent domain config.
+func (c *Client) SetMemStatsPeriod(domain string, seconds int) error {
+	_, err := c.run("dommemstat", domain, "--period", strconv.Itoa(seconds), "--live")
 	return err
 }
 
@@ -243,6 +285,7 @@ func (c *Client) CreateSnapshot(domain, name, description string, external bool,
 	if err != nil {
 		return err
 	}
+	stem := fileStem(name)
 	for i, d := range disks {
 		// Read-only removable media must not be snapshotted — a CD-ROM /
 		// floppy overlay is useless and can make the operation fail.
@@ -250,17 +293,46 @@ func (c *Client) CreateSnapshot(domain, name, description string, external bool,
 			args = append(args, "--diskspec", d.Target+",snapshot=no")
 			continue
 		}
-		path := fmt.Sprintf("%s/%s-%s-%d.qcow2", strings.TrimRight(externalDir, "/"), name, d.Target, i)
+		path := fmt.Sprintf("%s/%s-%s-%d.qcow2", strings.TrimRight(externalDir, "/"), stem, d.Target, i)
 		args = append(args, "--diskspec",
 			fmt.Sprintf("%s,snapshot=external,file=%s", d.Target, path))
 	}
 	if state, _ := c.State(domain); state == "running" || state == "paused" {
-		mem := fmt.Sprintf("%s/%s-memory.save", strings.TrimRight(externalDir, "/"), name)
+		mem := fmt.Sprintf("%s/%s-memory.save", strings.TrimRight(externalDir, "/"), stem)
 		args = append(args, "--memspec", "file="+mem+",snapshot=external")
 	}
 	args = append(args, "--atomic")
 	_, err = c.run(args...)
 	return err
+}
+
+// fileStem turns a snapshot name into a filename component. libvirt is happy
+// with spaces in a snapshot name, so the name and the overlay filename are
+// kept as two separate things: the snapshot keeps what the user typed, the
+// files on disk get a boring stem. Anything outside [A-Za-z0-9._-] becomes an
+// underscore, consecutive replacements collapse, and an empty result falls
+// back to "snap".
+func fileStem(name string) string {
+	var b strings.Builder
+	lastUnderscore := false
+	for _, r := range name {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9',
+			r == '.' || r == '-' || r == '_':
+			b.WriteRune(r)
+			lastUnderscore = false
+		default:
+			if !lastUnderscore {
+				b.WriteByte('_')
+				lastUnderscore = true
+			}
+		}
+	}
+	s := strings.Trim(b.String(), "_.")
+	if s == "" {
+		return "snap"
+	}
+	return s
 }
 
 // RevertSnapshot reverts to a snapshot. If force=true, allows reverting from

@@ -18,6 +18,35 @@ func TestValidName(t *testing.T) {
 	}
 }
 
+// Snapshot names are validated more loosely than domain names: a space is
+// legal for libvirt, the UI has always let users type one, and v0.6.3 then
+// refused to delete the result.
+func TestValidSnapshotName(t *testing.T) {
+	good := []string{"pre-update", "before Windows update", "v1.0", "snap_2", "a+b"}
+	for _, s := range good {
+		if !validSnapshotName(s) {
+			t.Errorf("validSnapshotName(%q) = false, want true", s)
+		}
+	}
+	bad := []string{
+		"",            // empty
+		"-x",          // flag injection
+		" lead",       // invisible leading space
+		"trail ",      // invisible trailing space
+		"two  spaces", // breaks the snapshot-list column parser
+		"..",          // traversal
+		"a..b",        // traversal
+		"a/b", "a\\b", // path separators
+		"a;b", "a$b", // shell metacharacters
+		"a\nb", "a\tb", // control characters
+	}
+	for _, s := range bad {
+		if validSnapshotName(s) {
+			t.Errorf("validSnapshotName(%q) = true, want false", s)
+		}
+	}
+}
+
 func TestValidHexID(t *testing.T) {
 	good := []string{"1d6b", "0bda", "ABCD", "0000", "ffff"}
 	for _, s := range good {

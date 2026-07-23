@@ -49,3 +49,26 @@ func TestSplitColumns(t *testing.T) {
 		t.Errorf("col2 = %q, want %q", cols[2], "disk-snapshot")
 	}
 }
+
+// fileStem decouples the on-disk overlay name from the snapshot name, so a
+// snapshot called "before Windows update" does not put spaces into the
+// --diskspec file= path.
+func TestFileStem(t *testing.T) {
+	cases := map[string]string{
+		"pre-update":            "pre-update",
+		"before Windows update": "before_Windows_update",
+		"a  b":                  "a_b",
+		"v1.0":                  "v1.0",
+		"  ":                    "snap",
+		"":                      "snap",
+		"...":                   "snap",
+		// Dots survive — they are legal in a filename. What makes traversal
+		// impossible is that the separators are gone.
+		"snap/../etc": "snap_.._etc",
+	}
+	for in, want := range cases {
+		if got := fileStem(in); got != want {
+			t.Errorf("fileStem(%q) = %q, want %q", in, got, want)
+		}
+	}
+}

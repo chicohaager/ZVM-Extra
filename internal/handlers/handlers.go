@@ -5,11 +5,13 @@ package handlers
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/chicohaager/zima-vm-extras/internal/autostart"
@@ -18,6 +20,7 @@ import (
 	"github.com/chicohaager/zima-vm-extras/internal/mounts"
 	"github.com/chicohaager/zima-vm-extras/internal/pci"
 	"github.com/chicohaager/zima-vm-extras/internal/schedule"
+	"github.com/chicohaager/zima-vm-extras/internal/settings"
 	"github.com/chicohaager/zima-vm-extras/internal/storage"
 	"github.com/chicohaager/zima-vm-extras/internal/tpm"
 	"github.com/chicohaager/zima-vm-extras/internal/usb"
@@ -35,11 +38,12 @@ type Server struct {
 	Backup       *backup.Manager
 	VNC          *vnc.Store
 	TPM          *tpm.Store
+	Settings     *settings.Store
 	SnapshotRoot string // base dir for external-snapshot files, e.g. /DATA/AppData/zima-vm-extras/snapshots
 }
 
-func NewServer(v *virsh.Client, st *autostart.Store, mm *mounts.Manager, us *usb.Store, pc *pci.Store, sc *schedule.Store, bk *backup.Manager, vn *vnc.Store, tp *tpm.Store, snapshotRoot string) *Server {
-	return &Server{Virsh: v, Auto: st, Mounts: mm, USB: us, PCI: pc, Sched: sc, Backup: bk, VNC: vn, TPM: tp, SnapshotRoot: snapshotRoot}
+func NewServer(v *virsh.Client, st *autostart.Store, mm *mounts.Manager, us *usb.Store, pc *pci.Store, sc *schedule.Store, bk *backup.Manager, vn *vnc.Store, tp *tpm.Store, se *settings.Store, snapshotRoot string) *Server {
+	return &Server{Virsh: v, Auto: st, Mounts: mm, USB: us, PCI: pc, Sched: sc, Backup: bk, VNC: vn, TPM: tp, Settings: se, SnapshotRoot: snapshotRoot}
 }
 
 // Routes returns a mux with all API endpoints mounted under /api.
@@ -58,6 +62,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("/api/pci/", s.pciDomain)
 	mux.HandleFunc("/api/storage/targets", s.storageTargets)
 	mux.HandleFunc("/api/metrics/", s.metricsHandler)
+	mux.HandleFunc("/api/power/", s.powerHandler)
 	mux.HandleFunc("/api/schedule", s.scheduleCollection)
 	mux.HandleFunc("/api/schedule/", s.scheduleItem)
 	mux.HandleFunc("/api/backup", s.backupCollection)
@@ -66,6 +71,7 @@ func (s *Server) Routes() *http.ServeMux {
 	mux.HandleFunc("/api/net/", s.netDomain)
 	mux.HandleFunc("/api/vnc/", s.vncDomain)
 	mux.HandleFunc("/api/tpm/", s.tpmDomain)
+	mux.HandleFunc("/api/settings", s.settingsHandler)
 	mux.HandleFunc("/api/mounts", s.mountsCollection)
 	mux.HandleFunc("/api/mounts/", s.mountsItem)
 	return mux
@@ -209,10 +215,10 @@ func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
 }
 
-// validName guards VM and snapshot names that are passed to virsh as CLI
-// arguments — rejecting flag injection (e.g. a name like "--metadata") and
-// shell-unsafe characters. virsh is exec'd without a shell, so this is
-// defence in depth.
+// validName guards VM names that are passed to virsh as CLI arguments —
+// rejecting flag injection (e.g. a name like "--metadata") and shell-unsafe
+// characters. virsh is exec'd without a shell, so this is defence in depth.
+// Snapshot names are looser and have their own rule; see validSnapshotName.
 func validName(s string) bool {
 	if s == "" || s[0] == '-' {
 		return false
@@ -386,8 +392,25 @@ func (s *Server) snapshotHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 400, "snapshot name required")
 		return
 	}
-	if !validName(snap) {
+	// Resolve the name against what libvirt actually has, rather than running
+	// it through a character allowlist. v0.6.3 used validName here, which
+	// refuses spaces — but the create path allowed them, so any snapshot with
+	// a space in its name could be made and then never deleted or reverted
+	// (reported by a user on v0.6.3). An existence check cannot strand a name
+	// we failed to anticipate, and the string we hand to virsh is one virsh
+	// gave us. The leading-dash guard stays: a snapshot named "--children"
+	// would otherwise be parsed as a flag.
+	if snap[0] == '-' {
 		writeErr(w, 400, "invalid snapshot name")
+		return
+	}
+	known, err := s.snapshotExists(vm, snap)
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	if !known {
+		writeErr(w, 404, "no snapshot named "+strconv.Quote(snap)+" on this VM")
 		return
 	}
 
@@ -415,6 +438,60 @@ func (s *Server) snapshotHandler(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// snapshotBase is the directory external snapshots go under: the one the
+// operator last used, falling back to the built-in location.
+func (s *Server) snapshotBase() string {
+	if d := s.Settings.Get().SnapshotDir; d != "" {
+		return d
+	}
+	return s.SnapshotRoot
+}
+
+// snapshotExists reports whether the domain has a snapshot with exactly this
+// name. Used as the allowlist for the delete and revert routes.
+func (s *Server) snapshotExists(vm, snap string) (bool, error) {
+	list, err := s.Virsh.ListSnapshots(vm)
+	if err != nil {
+		return false, err
+	}
+	for _, e := range list {
+		if e.Name == snap {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+// validSnapshotName guards names on the *create* path. It is deliberately
+// laxer than validName: libvirt accepts spaces and the UI has been creating
+// such snapshots since v0.5.x, so refusing them now would only break existing
+// habits. Two consecutive spaces are the one exception — `virsh snapshot-list`
+// is a column table whose separator is a run of 2+ spaces, so a name
+// containing one cannot be read back out of the listing.
+func validSnapshotName(s string) bool {
+	if s == "" || s[0] == '-' {
+		return false
+	}
+	if s != strings.TrimSpace(s) {
+		return false // leading/trailing whitespace is invisible in the UI
+	}
+	if strings.Contains(s, "  ") {
+		return false
+	}
+	if s == "." || s == ".." || strings.Contains(s, "..") {
+		return false
+	}
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case r == '_' || r == '.' || r == '-' || r == '+' || r == ' ':
+		default:
+			return false
+		}
+	}
+	return true
+}
+
 type snapshotsResponse struct {
 	Data          []virsh.Snapshot `json:"data"`
 	Current       string           `json:"current"`
@@ -438,7 +515,7 @@ func (s *Server) snapshotList(w http.ResponseWriter, vm string) {
 	extReq := state == "running" || state == "paused"
 	writeJSON(w, 200, snapshotsResponse{
 		Data: list, Current: cur, HasUEFI: uefi, State: state, ExtRequired: extReq,
-		DefaultExtDir: filepath.Join(s.SnapshotRoot, vm),
+		DefaultExtDir: filepath.Join(s.snapshotBase(), vm),
 	})
 }
 
@@ -459,9 +536,9 @@ func (s *Server) snapshotCreate(w http.ResponseWriter, r *http.Request, vm strin
 		writeErr(w, 400, "snapshot name required")
 		return
 	}
-	// Refuse names with path traversal characters.
-	if strings.ContainsAny(in.Name, "/\\.") {
-		writeErr(w, 400, "snapshot name must not contain '/', '\\\\' or '.'")
+	if !validSnapshotName(in.Name) {
+		writeErr(w, 400, "snapshot name may contain letters, digits, single spaces and _ . - + "+
+			"— no leading '-', no '..', no double spaces")
 		return
 	}
 	// Bound the free-text description: it is passed to virsh and stored in
@@ -485,7 +562,7 @@ func (s *Server) snapshotCreate(w http.ResponseWriter, r *http.Request, vm strin
 	if external {
 		extDir = strings.TrimSpace(in.ExternalDir)
 		if extDir == "" {
-			extDir = filepath.Join(s.SnapshotRoot, vm)
+			extDir = filepath.Join(s.snapshotBase(), vm)
 		}
 		// Guardrail: the dir must be absolute and not contain ".." traversal.
 		if !filepath.IsAbs(extDir) || strings.Contains(extDir, "..") {
@@ -505,6 +582,22 @@ func (s *Server) snapshotCreate(w http.ResponseWriter, r *http.Request, vm strin
 	if err := s.Virsh.CreateSnapshot(vm, in.Name, in.Description, external, extDir); err != nil {
 		writeErr(w, 500, err.Error())
 		return
+	}
+	// Remember where external snapshots went, so the next visit to the tab
+	// offers the same place instead of resetting to the built-in default.
+	// The stored value is the base without the per-VM subdirectory, which is
+	// how the UI composes the path in the first place.
+	if external {
+		base := extDir
+		if filepath.Base(base) == vm {
+			base = filepath.Dir(base)
+		}
+		if cur := s.Settings.Get(); cur.SnapshotDir != base {
+			cur.SnapshotDir = base
+			if setErr := s.Settings.Set(cur); setErr != nil {
+				log.Printf("settings: remember snapshot dir: %v", setErr)
+			}
+		}
 	}
 	writeJSON(w, 201, map[string]any{"name": in.Name, "external": external, "external_dir": extDir})
 }
@@ -746,6 +839,106 @@ func (s *Server) pciDomain(w http.ResponseWriter, r *http.Request) {
 	writeErr(w, 405, "method not allowed")
 }
 
+// ---------- UI settings ----------
+
+// settingsHandler: GET /api/settings, PUT /api/settings.
+//
+// Only directory paths live here, and each is validated the same way the
+// snapshot and backup targets are — an absolute path, no "..", not a system
+// location. Storing a path is harmless on its own, but a bad one saved here
+// would come back as a pre-filled default, so it is rejected on the way in.
+func (s *Server) settingsHandler(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case "GET":
+		writeJSON(w, 200, s.Settings.Get())
+	case "PUT":
+		var in settings.Data
+		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+			writeErr(w, 400, err.Error())
+			return
+		}
+		in.BackupDir = strings.TrimSpace(in.BackupDir)
+		in.SnapshotDir = strings.TrimSpace(in.SnapshotDir)
+		for label, p := range map[string]string{"backup_dir": in.BackupDir, "snapshot_dir": in.SnapshotDir} {
+			if p == "" {
+				continue // empty means "forget it and use the default again"
+			}
+			if !filepath.IsAbs(p) || strings.Contains(p, "..") {
+				writeErr(w, 400, label+" must be an absolute path without '..'")
+				return
+			}
+			if forbiddenSnapshotDir(p) {
+				writeErr(w, 400, label+" is not allowed (system path)")
+				return
+			}
+		}
+		if err := s.Settings.Set(in); err != nil {
+			writeErr(w, 500, err.Error())
+			return
+		}
+		writeJSON(w, 200, s.Settings.Get())
+	default:
+		writeErr(w, 405, "method not allowed")
+	}
+}
+
+// ---------- Power control ----------
+
+type powerReq struct {
+	Action string `json:"action"`
+}
+
+// powerHandler: POST /api/power/<vm> — {"action": "start"|"shutdown"|
+// "reboot"|"force-off"|"suspend"|"resume"}.
+//
+// "shutdown" and "reboot" are polite ACPI requests the guest may ignore;
+// "force-off" is the plug-pull and the UI asks before sending it. Every
+// action is a no-op-or-error at the libvirt level — nothing here writes to
+// the persistent domain config.
+func (s *Server) powerHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "POST" {
+		writeErr(w, 405, "method not allowed")
+		return
+	}
+	vm := strings.Trim(strings.TrimPrefix(r.URL.Path, "/api/power/"), "/")
+	if vm == "" || !validName(vm) {
+		writeErr(w, 400, "invalid vm name")
+		return
+	}
+	var in powerReq
+	if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
+		writeErr(w, 400, err.Error())
+		return
+	}
+
+	var err error
+	switch in.Action {
+	case "start":
+		err = s.Virsh.Start(vm)
+	case "shutdown":
+		err = s.Virsh.Shutdown(vm)
+	case "reboot":
+		err = s.Virsh.Reboot(vm)
+	case "force-off":
+		err = s.Virsh.Destroy(vm)
+	case "suspend":
+		err = s.Virsh.Suspend(vm)
+	case "resume":
+		err = s.Virsh.Resume(vm)
+	default:
+		writeErr(w, 400, "action must be start, shutdown, reboot, force-off, suspend or resume")
+		return
+	}
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	// Report the state we can actually see rather than the one we asked for:
+	// an ACPI shutdown returns immediately while the guest is still running.
+	state, _ := s.Virsh.State(vm)
+	writeJSON(w, 200, map[string]any{"vm": vm, "action": in.Action, "state": state})
+}
+
 // ---------- Live metrics ----------
 
 type netStat struct {
@@ -761,15 +954,66 @@ type blockStat struct {
 }
 
 type metricsResponse struct {
-	VM        string      `json:"vm"`
-	State     string      `json:"state"`
-	TSMillis  int64       `json:"ts_ms"`       // server timestamp for rate calculation
-	CPUTimeNS uint64      `json:"cpu_time_ns"` // cumulative
-	VCPUs     int         `json:"vcpus"`
-	MemCurKiB uint64      `json:"mem_cur_kib"`
-	MemMaxKiB uint64      `json:"mem_max_kib"`
-	Nets      []netStat   `json:"nets"`
-	Blocks    []blockStat `json:"blocks"`
+	VM        string `json:"vm"`
+	State     string `json:"state"`
+	TSMillis  int64  `json:"ts_ms"`       // server timestamp for rate calculation
+	CPUTimeNS uint64 `json:"cpu_time_ns"` // cumulative
+	VCPUs     int    `json:"vcpus"`
+
+	// Balloon sizing. MemCurKiB is the balloon's *target*, not consumption:
+	// with an uninflated balloon it equals MemMaxKiB, which is why v0.6.3
+	// showed every VM at 100 %.
+	MemCurKiB uint64 `json:"mem_cur_kib"`
+	MemMaxKiB uint64 `json:"mem_max_kib"`
+
+	// In-guest figures, present only when the guest's balloon driver reports
+	// them (see virsh.SetMemStatsPeriod). MemStats says whether they are.
+	MemStats     bool   `json:"mem_stats"`
+	MemAvailKiB  uint64 `json:"mem_avail_kib,omitempty"`  // total RAM the guest sees
+	MemUnusedKiB uint64 `json:"mem_unused_kib,omitempty"` // free, from the guest's view
+	MemUsableKiB uint64 `json:"mem_usable_kib,omitempty"` // free + reclaimable caches
+	MemRSSKiB    uint64 `json:"mem_rss_kib,omitempty"`    // host-side RSS of the qemu process
+
+	Nets   []netStat   `json:"nets"`
+	Blocks []blockStat `json:"blocks"`
+}
+
+// memStatsArmed rate-limits the attempt to enable balloon stats collection.
+// The metrics tab polls every 2 s; without this we would run `dommemstat
+// --period` on every sample. Deliberately a timestamp and not a done-flag:
+// the period lives on the running domain, so a VM restart silently loses it
+// and we must be able to re-arm without a daemon restart.
+var memStatsArmed sync.Map // domain name -> time.Time of last attempt
+
+// memStatsPeriodSec is how often the guest refreshes its balloon statistics.
+const memStatsPeriodSec = 5
+
+// armMemStats enables the guest balloon statistics for a running domain if
+// they are missing, at most once every 30 s per domain. Best effort: a guest
+// without a balloon driver never reports them, and that is not an error —
+// the UI shows the allocation instead and says so.
+func (s *Server) armMemStats(vm string, stats map[string]string) map[string]string {
+	if stats["state.state"] != "1" { // only a running domain can collect
+		return stats
+	}
+	if stats["balloon.available"] != "" { // already reporting
+		return stats
+	}
+	if last, ok := memStatsArmed.Load(vm); ok {
+		if t, _ := last.(time.Time); time.Since(t) < 30*time.Second {
+			return stats
+		}
+	}
+	memStatsArmed.Store(vm, time.Now())
+	if err := s.Virsh.SetMemStatsPeriod(vm, memStatsPeriodSec); err != nil {
+		return stats
+	}
+	// The guest needs a moment to publish its first sample, so this re-read
+	// usually still comes back empty — the next poll picks it up.
+	if fresh, err := s.Virsh.DomainStats(vm); err == nil {
+		return fresh
+	}
+	return stats
 }
 
 // metricsHandler: GET /api/metrics/<vm> — one libvirt domstats sample.
@@ -789,6 +1033,7 @@ func (s *Server) metricsHandler(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, 500, err.Error())
 		return
 	}
+	stats = s.armMemStats(vm, stats)
 	out := metricsResponse{
 		VM:        vm,
 		State:     domStateName(stats["state.state"]),
@@ -797,7 +1042,16 @@ func (s *Server) metricsHandler(w http.ResponseWriter, r *http.Request) {
 		VCPUs:     int(atou(stats["vcpu.current"])),
 		MemCurKiB: atou(stats["balloon.current"]),
 		MemMaxKiB: atou(stats["balloon.maximum"]),
+
+		MemAvailKiB:  atou(stats["balloon.available"]),
+		MemUnusedKiB: atou(stats["balloon.unused"]),
+		MemUsableKiB: atou(stats["balloon.usable"]),
+		MemRSSKiB:    atou(stats["balloon.rss"]),
 	}
+	// Only claim in-guest numbers when both halves of the subtraction are
+	// real. "unused" alone is meaningless, and available < unused would be a
+	// nonsense sample we would rather drop than render.
+	out.MemStats = out.MemAvailKiB > 0 && out.MemUnusedKiB > 0 && out.MemUnusedKiB <= out.MemAvailKiB
 	for i := 0; i < int(atou(stats["net.count"])); i++ {
 		p := fmt.Sprintf("net.%d.", i)
 		out.Nets = append(out.Nets, netStat{
@@ -913,6 +1167,11 @@ func (s *Server) backupItem(w http.ResponseWriter, r *http.Request) {
 	_ = json.NewDecoder(r.Body).Decode(&in)
 	dest := strings.TrimSpace(in.DestDir)
 	if dest == "" {
+		// Fall back to the remembered target before the built-in default, so
+		// a caller that sends no dest_dir lands where the last one did.
+		dest = s.Settings.Get().BackupDir
+	}
+	if dest == "" {
 		dest = filepath.Join(filepath.Dir(s.SnapshotRoot), "backups")
 	}
 	if !filepath.IsAbs(dest) || strings.Contains(dest, "..") {
@@ -927,6 +1186,15 @@ func (s *Server) backupItem(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		writeErr(w, 400, err.Error())
 		return
+	}
+	// Remember the target that actually started a job — a path that failed
+	// validation must not become the next default.
+	cur := s.Settings.Get()
+	if cur.BackupDir != dest {
+		cur.BackupDir = dest
+		if setErr := s.Settings.Set(cur); setErr != nil {
+			log.Printf("settings: remember backup dir: %v", setErr)
+		}
 	}
 	writeJSON(w, 202, job)
 }
@@ -1110,11 +1378,20 @@ func (s *Server) vncDomain(w http.ResponseWriter, r *http.Request) {
 		// live console separately — otherwise the UI shows "protected" over a
 		// console that anyone on the LAN can still open right now.
 		running, liveHasPw, liveErr := s.Virsh.VNCLiveInfo(vm)
+		_, port, autoport, _ := s.Virsh.VNCListenInfo(vm)
 		resp := map[string]any{
 			"vm": vm, "present": present, "protected": hasPw,
 			"listen": listen, "pinned": pinned,
+			"port": port, "autoport": autoport,
 			"running": running, "live_protected": liveHasPw,
 			"restart_required": running && hasPw && !liveHasPw,
+		}
+		// The address the running qemu is bound to, which is not necessarily
+		// the configured one — same reason the password is reported twice.
+		if _, liveListen, livePort, err := s.Virsh.VNCLiveListen(vm); err == nil && running {
+			resp["live_listen"] = liveListen
+			resp["live_port"] = livePort
+			resp["listen_restart_required"] = liveListen != "" && liveListen != listen
 		}
 		if liveErr != nil {
 			// Never silently claim the live console is fine when we failed to
@@ -1128,25 +1405,88 @@ func (s *Server) vncDomain(w http.ResponseWriter, r *http.Request) {
 	case "POST":
 		var in struct {
 			Password string `json:"password"`
+			Listen   string `json:"listen"` // optional: "127.0.0.1" | "0.0.0.0"
+			Port     int    `json:"port"`   // optional: 0 = autoport
 		}
 		if err := json.NewDecoder(r.Body).Decode(&in); err != nil {
 			writeErr(w, 400, err.Error())
 			return
 		}
+		// Changing only the listen address should not require retyping a
+		// password the operator may not remember — reuse the pinned one. This
+		// is also what keeps the exposure guard honest: every path through
+		// here ends with a password on the console, so "0.0.0.0" can never be
+		// selected for an unprotected one.
+		if in.Password == "" {
+			if pinnedEntry, ok := s.VNC.Get(vm); ok && pinnedEntry.Password != "" {
+				in.Password = pinnedEntry.Password
+			}
+		}
+		// Two addresses only. A free-form field here is a foot-gun: a typo
+		// binds the console to an address that does not exist on the host and
+		// the VM then fails to start, which is a worse outcome than not
+		// offering the choice.
+		if in.Listen != "" && in.Listen != "127.0.0.1" && in.Listen != "0.0.0.0" {
+			writeErr(w, 400, "listen must be 127.0.0.1 (local only) or 0.0.0.0 (all interfaces)")
+			return
+		}
+		if in.Port != 0 && (in.Port < 5900 || in.Port > 65535) {
+			writeErr(w, 400, "port must be 0 (automatic) or between 5900 and 65535")
+			return
+		}
+
+		// Restricting a console to localhost is protective in itself, so it is
+		// allowed with no password at all. Putting one on 0.0.0.0 is not:
+		// that is precisely the ZVM default this tab exists to close, and
+		// ValidPassword below refuses an empty password, so every exposing
+		// path ends with authentication on the console.
+		if in.Password == "" && in.Listen == "127.0.0.1" {
+			if err := s.Virsh.SetVNCListen(vm, in.Listen, in.Port); err != nil {
+				writeErr(w, 500, err.Error())
+				return
+			}
+			entry := vnc.Entry{VM: vm, Listen: in.Listen, Port: in.Port}
+			if prev, ok := s.VNC.Get(vm); ok {
+				entry.Password = prev.Password // keep any pinned password
+			}
+			if err := s.VNC.Set(entry); err != nil {
+				writeErr(w, 500, "listen set, but pinning failed: "+err.Error())
+				return
+			}
+			writeJSON(w, 200, map[string]any{
+				"listen": in.Listen, "port": in.Port,
+				"note": "takes effect on next VM start",
+			})
+			return
+		}
+
 		if !vnc.ValidPassword(in.Password) {
-			writeErr(w, 400, "password must be 1–8 characters, printable ASCII, without quotes or <>&")
+			msg := "password must be 1–8 characters, printable ASCII, without quotes or <>&"
+			if in.Listen == "0.0.0.0" {
+				msg = "a console on all interfaces needs a password — set one, or choose 127.0.0.1 (local only)"
+			}
+			writeErr(w, 400, msg)
 			return
 		}
 		if err := s.Virsh.SetVNCPassword(vm, in.Password); err != nil {
 			writeErr(w, 500, err.Error())
 			return
 		}
+		if in.Listen != "" {
+			if err := s.Virsh.SetVNCListen(vm, in.Listen, in.Port); err != nil {
+				writeErr(w, 500, "password set, but listen address failed: "+err.Error())
+				return
+			}
+		}
 		// Pin it so the reconciler keeps it applied across ZVM re-saves.
-		if err := s.VNC.Set(vnc.Entry{VM: vm, Password: in.Password}); err != nil {
+		if err := s.VNC.Set(vnc.Entry{VM: vm, Password: in.Password, Listen: in.Listen, Port: in.Port}); err != nil {
 			writeErr(w, 500, "password set, but pinning failed: "+err.Error())
 			return
 		}
-		writeJSON(w, 200, map[string]any{"protected": true, "note": "takes effect on next VM start"})
+		writeJSON(w, 200, map[string]any{
+			"protected": true, "listen": in.Listen, "port": in.Port,
+			"note": "takes effect on next VM start",
+		})
 
 	case "DELETE":
 		// Unpin first so the reconciler will not immediately re-apply it.

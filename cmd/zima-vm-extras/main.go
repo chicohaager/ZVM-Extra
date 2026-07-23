@@ -29,6 +29,7 @@ import (
 	"github.com/chicohaager/zima-vm-extras/internal/mounts"
 	"github.com/chicohaager/zima-vm-extras/internal/pci"
 	"github.com/chicohaager/zima-vm-extras/internal/schedule"
+	"github.com/chicohaager/zima-vm-extras/internal/settings"
 	"github.com/chicohaager/zima-vm-extras/internal/tpm"
 	"github.com/chicohaager/zima-vm-extras/internal/usb"
 	"github.com/chicohaager/zima-vm-extras/internal/virsh"
@@ -83,6 +84,11 @@ func main() {
 		log.Fatalf("open vnc store: %v", err)
 	}
 
+	settingsStore, err := settings.NewStore(filepath.Join(cfg.DataDir, "settings.json"))
+	if err != nil {
+		log.Fatalf("open settings store: %v", err)
+	}
+
 	backupMgr := backup.NewManager(vc, log.Printf)
 
 	// Re-mount everything tagged AutoMount=true. Best effort; errors are logged.
@@ -92,7 +98,7 @@ func main() {
 	// Runs once per boot (guarded by a tmpfs marker).
 	go store.Run(vc, log.Printf)
 
-	srv := handlers.NewServer(vc, store, mountMgr, usbStore, pciStore, schedStore, backupMgr, vncStore, tpmStore, snapRoot)
+	srv := handlers.NewServer(vc, store, mountMgr, usbStore, pciStore, schedStore, backupMgr, vncStore, tpmStore, settingsStore, snapRoot)
 
 	mux := http.NewServeMux()
 	mux.Handle("/api/", srv.Routes())

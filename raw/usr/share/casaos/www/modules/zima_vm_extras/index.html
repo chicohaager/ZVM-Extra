@@ -7,7 +7,7 @@
   <meta name="robots" content="noindex">
   <meta http-equiv="cache-control" content="no-cache, no-store, must-revalidate">
   <title>VM Extras</title>
-  <link rel="stylesheet" href="./styles.css?v=0.6.3">
+  <link rel="stylesheet" href="./styles.css?v=0.7.0-e53f4636">
 </head>
 <body>
   <header>
@@ -68,14 +68,15 @@
           <label class="checkbox"><input type="checkbox" id="snap-external" disabled> Full snapshot <small>(auto: running VMs → disk + memory)</small></label>
           <button id="snap-create-btn" class="btn-primary">Create</button>
         </div>
-        <div class="form-row snap-extdir-row" id="snap-extdir-row" style="display:none;">
+        <div class="form-row snap-extdir-row" id="snap-extdir-row">
           <label class="grow">Storage target
             <select id="snap-storage-select"></select>
           </label>
           <label class="grow">External target directory
             <input type="text" id="snap-extdir" placeholder="/DATA/AppData/zima-vm-extras/snapshots/&lt;vm&gt;/">
           </label>
-          <small class="hint-inline">Pick a mounted filesystem or type a custom absolute path. Disallowed: <code>/usr</code>, <code>/var</code>, <code>/etc</code>, <code>/proc</code>, <code>/sys</code>, <code>/dev</code>, <code>/boot</code>, <code>/run</code>, <code>/tmp</code>. Network shares from the Remote storage tab can be used here too.</small>
+          <small class="hint-inline" id="snap-extdir-note"></small>
+          <small class="hint-inline">Pick a mounted filesystem or type a custom absolute path. Disallowed: <code>/usr</code>, <code>/var</code>, <code>/etc</code>, <code>/proc</code>, <code>/sys</code>, <code>/dev</code>, <code>/boot</code>, <code>/run</code>, <code>/tmp</code>. Network shares from the Remote storage tab can be used here too. The last target you used is remembered.</small>
         </div>
       </div>
       <div class="snap-create card">
@@ -165,7 +166,12 @@
         <select id="pci-vm-select"></select>
       </div>
       <div class="usb-host-wrap">
-        <h3>Host PCI devices</h3>
+        <h3>Host PCI devices
+          <label class="checkbox list-filter" title="Bridges and host-internal devices can never be passed through to a VM.">
+            <input type="checkbox" id="pci-show-all"> Show bridges &amp; non-passable
+          </label>
+        </h3>
+        <div id="pci-filter-note" class="list-filter-note"></div>
         <div id="pci-host-list" class="usb-list">
           <div class="loading">Loading…</div>
         </div>
@@ -180,7 +186,12 @@
         <br><small><b>Note:</b> the VNC protocol only uses the first 8&nbsp;characters. The
         password edits the VM config and takes effect on the <b>next VM start</b>; ZVM's own
         browser console will then prompt for it. VM Extras re-applies the password if the ZVM
-        UI strips it on a re-save, and keeps it across host reboots.</small>
+        UI strips it on a re-save, and keeps it across host reboots.
+        <br><b>Reachability</b> is the other half: a password stops someone <i>using</i> the
+        console, the listen address stops them <i>reaching</i> it. Restricting it to
+        <code>127.0.0.1</code> leaves it open only to an SSH tunnel or a reverse proxy running on
+        the ZimaOS box. Putting a console back on all interfaces requires a password to be set.
+        The address is pinned and re-applied like the password.</small>
       </p>
       <div class="vm-picker-row">
         <label for="vnc-vm-select">VM:</label>
@@ -274,6 +285,6 @@
     <span id="status"></span>
   </footer>
 
-  <script src="./app.js?v=0.6.3"></script>
+  <script src="./app.js?v=0.7.0-eaf42215"></script>
 </body>
 </html>

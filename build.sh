@@ -33,6 +33,27 @@ echo "  → $(ls -lh "$RAW/usr/bin/zima-vm-extras" | awk '{print $5}')"
 
 # 2. Verify the layout matches the sysext / CasaOS conventions.
 echo "[2/3] Verifying layout..."
+
+# The UI is served by the ZimaOS gateway with ordinary caching, so index.html
+# carries ?v=… on its script and stylesheet to force a re-fetch. That string
+# was hand-maintained and went stale between 0.6.3 and 0.7.0 — the daemon
+# reported the new version while every browser kept running the old app.js.
+#
+# The stamp is version *plus a hash of the file itself*, because a version
+# alone is not enough: two builds of the same version with different assets
+# would produce the same URL, and every browser that already visited would
+# keep the old copy. Hashing makes the URL change whenever the bytes do.
+INDEX="$RAW/usr/share/casaos/www/modules/$NAME/index.html"
+WWW="$RAW/usr/share/casaos/www/modules/$NAME"
+if [ -f "$INDEX" ]; then
+  for asset in app.js styles.css; do
+    [ -f "$WWW/$asset" ] || continue
+    h=$(sha256sum "$WWW/$asset" | cut -c1-8)
+    esc=$(echo "$asset" | sed 's/\./\\./g')
+    sed -i "s|$esc?v=[^\"]*|$asset?v=$VERSION-$h|g" "$INDEX"
+    echo "  → stamped $asset?v=$VERSION-$h"
+  done
+fi
 required="
 $RAW/usr/lib/extension-release.d/extension-release.$NAME
 $RAW/usr/lib/systemd/system/zima-vm-extras.service
